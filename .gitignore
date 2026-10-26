@@ -1,0 +1,6 @@
+/build/
+/out/
+/.vs/
+/vcpkg_installed/
+/third_party/uxplay-src/
+CMakeUserPresets.json
