@@ -32,6 +32,8 @@ constexpr size_t kGapMarginFrames = kRate * 25 / 1000;   // margin over the long
 constexpr size_t kShrinkFrames = kRate * 10 / 1000;      // -10 ms per 15 s without one
 constexpr size_t kRateBandFrames = kRate * 40 / 1000;    // speed up beyond target + 40 ms
 constexpr size_t kHardTrimFrames = kRate * 500 / 1000;   // cut only after a >0.5 s pile-up
+constexpr double kPauseGapMs = 1000.0;                   // a longer silence is a pause, not jitter
+constexpr ULONGLONG kIdleMs = 400;                       // nothing arrives this long after running dry: sound ended
 
 // Codec configuration exactly as UxPlay feeds GStreamer (renderers/audio_renderer.c).
 constexpr uint8_t kAacEld[] = {0xf8, 0xe8, 0x50, 0x00};  // ct 8: AAC-ELD 44100/2, 480 spf
@@ -187,10 +189,15 @@ void AudioPipeline::push(const AVFrame* f) {
     QueryPerformanceFrequency(&freq);
     if (last_push_qpc_) {
         double gap_ms = static_cast<double>(now.QuadPart - last_push_qpc_) * 1000.0 / static_cast<double>(freq.QuadPart);
-        peak_gap_ms_ = std::max(gap_ms, peak_gap_ms_ - gap_ms * 0.002);
+        if (gap_ms > kPauseGapMs) {
+            peak_gap_ms_ = 0;  // the phone simply stopped sending (nothing playing): not network jitter
+        } else {
+            peak_gap_ms_ = std::max(gap_ms, peak_gap_ms_ - gap_ms * 0.005);  // decays ~5 ms per second
+        }
         peak_gap_frames_ = static_cast<size_t>(peak_gap_ms_ * kRate / 1000.0);
     }
     last_push_qpc_ = now.QuadPart;
+    last_push_tick_ = GetTickCount64();
 
     size_t write = write_pos_.load(std::memory_order_relaxed);
     size_t read = read_pos_.load(std::memory_order_acquire);
@@ -266,6 +273,7 @@ void AudioPipeline::render_loop() {
         double rate = 1.0;
         uint64_t underruns = 0, total_underruns = 0, trims = 0;
         ULONGLONG last_underrun = GetTickCount64(), last_stats = GetTickCount64();
+        ULONGLONG drained_at = 0;  // when the queue last ran dry (0 = not pending)
         HANDLE waits[2] = {wake_, buffer_event};
         while (running_ && !device_changed_) {
             WaitForMultipleObjects(2, waits, FALSE, 100);
@@ -283,6 +291,23 @@ void AudioPipeline::render_loop() {
             if (FAILED(hr)) break;  // device invalidated: reopen the (new) default device
 
             ULONGLONG now = GetTickCount64();
+            if (drained_at) {
+                ULONGLONG last_push = last_push_tick_.load();
+                if (last_push > drained_at) {
+                    // Packets came back soon after running dry: the link stalled longer than the buffer
+                    // covers. Grow the target (the queue re-primes to it before playing again).
+                    ++underruns;
+                    ++total_underruns;
+                    last_underrun = now;
+                    target = std::min(target + kGrowFrames, kMaxTargetFrames);
+                    drained_at = 0;
+                } else if (now - drained_at > kIdleMs) {
+                    // Nothing more arrived: the sound simply ended. The next one starts from a fresh buffer
+                    // instead of inheriting this one's history.
+                    target = kStartTargetFrames;
+                    drained_at = 0;
+                }
+            }
             const size_t delay = static_cast<size_t>(extra_delay_frames_.load());  // "Sync audio to video" offset
             // Hold at least the longest recent arrival gap plus a margin (predictive), never less.
             size_t needed = std::min(peak_gap_frames_.load() + kGapMarginFrames, kMaxTargetFrames);
@@ -336,15 +361,11 @@ void AudioPipeline::render_loop() {
                 client->Start();
                 playing = true;
             } else if (playing && !n && !padding) {
-                // Ran dry: the link stalled longer than the buffer covers. Grow the target and re-prime.
                 client->Stop();
                 client->Reset();
                 playing = false;
                 frac = 0.0;
-                ++underruns;
-                ++total_underruns;
-                last_underrun = now;
-                target = std::min(target + kGrowFrames, kMaxTargetFrames);
+                drained_at = now;  // stall or end of the sound? decided by what happens next
             }
             if (playing && now - last_underrun > 15000 && target > kMinTargetFrames) {
                 target = std::max(target - kShrinkFrames, kMinTargetFrames);  // calm link: win latency back

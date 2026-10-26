@@ -208,6 +208,8 @@ void LabRunner::execute(const Step& s) {
         session().files().start(dir_ / arg(0), session().video());
     } else if (v == "audio") {
         session().files().start_audio(dir_ / arg(0), session().audio());
+    } else if (v == "audio-stop") {
+        session().files().stop_audio();
     } else if (v == "impair") {
         Impairment imp;
         for (const std::string& a : s.args) {

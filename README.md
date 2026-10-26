@@ -41,6 +41,7 @@ Installer (Inno Setup 6): `ISCC.exe installer\phonemirror.iss` → `build\instal
 | `receivers` | `2` | Phones at once (1–4, also tray › Phones at once); extra ones appear as "PhoneMirror (2)" … |
 | `codec` | `"auto"` | `"h264"` forces H.264 (1080 lines max) |
 | `max_fps`, `refresh_rate` | `60`, `60` | Advertised to the iPhone |
+| `max_width`, `max_height` | `2560`, `2160` | Largest stream requested (H.265). Height sets portrait sharpness; the width cap keeps landscape off a 4K60 encode that makes the iPhone throttle |
 | `tearing` | `true` | Lowest latency; `false` for tear-free |
 | `always_on_top`, `stats` | `false` | Also toggled from the hover bar |
 | `swap_ctrl_cmd` | `true` | Ctrl acts as Command on the iPhone |

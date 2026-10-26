@@ -82,6 +82,7 @@ private:
     int64_t last_push_qpc_ = 0;
     double peak_gap_ms_ = 0;
     std::atomic<size_t> peak_gap_frames_ = 0;
+    std::atomic<ULONGLONG> last_push_tick_ = 0;
     std::atomic<Recorder*> recorder_ = nullptr;
     std::atomic<bool> running_ = true;
     std::atomic<bool> device_changed_ = false;

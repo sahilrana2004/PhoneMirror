@@ -21,7 +21,8 @@ inline constexpr UINT kMsgLabQuit = WM_APP + 30;
 // (SendInput), so the same code paths run as with a person at the keyboard. Format, one step per line:
 //
 //   <ms> video <clip>            switch/start the video clip (clips resolve against the scenario folder)
-//   <ms> audio <clip>            start audio playback
+//   <ms> audio <clip>            start audio playback (restarts it if already playing)
+//   <ms> audio-stop              stop sending audio, as a phone does when nothing is playing
 //   <ms> impair jitter=<ms> burst=<n>/<every>
 //   <ms> focus                   bring the mirror window to the front
 //   <ms> key <combo>             e.g. ctrl+shift+r, f3, ctrl+1, ctrl+alt, esc

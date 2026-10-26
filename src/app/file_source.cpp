@@ -107,6 +107,7 @@ void FileSource::set_impairment(const Impairment& impairment) {
 }
 
 bool FileSource::start_audio(const std::filesystem::path& path, AudioSink& sink) {
+    stop_audio();  // restarting audio after a pause is how the lab simulates "nothing playing"
     AVFormatContext* fmt = nullptr;
     if (avformat_open_input(&fmt, log::utf8(path.wstring()).c_str(), nullptr, nullptr) < 0 ||
         avformat_find_stream_info(fmt, nullptr) < 0) {
@@ -124,6 +125,7 @@ bool FileSource::start_audio(const std::filesystem::path& path, AudioSink& sink)
     }
     log::info("--play-audio: {} (ct {})", log::utf8(path.wstring()), ct);
     running_ = true;
+    audio_running_ = true;
     audio_thread_ = std::thread([this, fmt, index, ct, &sink]() mutable {
         AVRational tb = fmt->streams[index]->time_base;
         AVPacket* pkt = av_packet_alloc();
@@ -131,7 +133,7 @@ bool FileSource::start_audio(const std::filesystem::path& path, AudioSink& sink)
         std::minstd_rand rng(54321);
         std::vector<std::vector<uint8_t>> held;
         uint64_t packets = 0;
-        while (running_ && av_read_frame(fmt, pkt) >= 0) {
+        while (running_ && audio_running_ && av_read_frame(fmt, pkt) >= 0) {
             if (pkt->stream_index == index) {
                 if (pkt->pts != AV_NOPTS_VALUE) {  // AAC priming makes the first pts negative
                     int64_t due_ms = pkt->pts * 1000 * tb.num / tb.den;
@@ -167,6 +169,11 @@ bool FileSource::start_audio(const std::filesystem::path& path, AudioSink& sink)
 void FileSource::stop() {
     running_ = false;
     stop_video();
+    stop_audio();
+}
+
+void FileSource::stop_audio() {
+    audio_running_ = false;
     if (audio_thread_.joinable()) audio_thread_.join();
 }
 

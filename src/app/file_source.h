@@ -30,6 +30,7 @@ public:
     bool start_audio(const std::filesystem::path& path, AudioSink& sink);
     void stop();
     void stop_video();
+    void stop_audio();
     void set_impairment(const Impairment& impairment);
 
 private:
@@ -37,6 +38,7 @@ private:
     std::thread audio_thread_;
     std::atomic<bool> running_ = false;
     std::atomic<bool> video_running_ = false;
+    std::atomic<bool> audio_running_ = false;
     bool mirror_started_ = false;
     std::mutex impairment_mutex_;
     Impairment impairment_;

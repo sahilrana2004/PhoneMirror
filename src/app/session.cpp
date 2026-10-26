@@ -24,8 +24,11 @@ bool Session::start_receiver() {
     // iOS sizes the stream from the requested height and only exceeds 1080 lines over H.265.
     std::string codec = s.get_string("codec", "auto");
     config.h265 = codec == "h264" ? false : window_.renderer().supports_hevc();
-    config.width = config.h265 ? 3840 : 1920;
-    config.height = config.h265 ? 2160 : 1080;
+    // The height sets portrait size (2160 -> the phone's native 994x2160); the width caps landscape. 2560 keeps
+    // landscape near 3 MP instead of a 4K60 encode that makes the iPhone heat up and throttle after a few
+    // minutes. H.264 tops out at 1080 lines.
+    config.width = static_cast<int>(s.get_number("max_width", config.h265 ? 2560 : 1920));
+    config.height = static_cast<int>(s.get_number("max_height", config.h265 ? 2160 : 1080));
     config.refresh_rate = static_cast<int>(s.get_number("refresh_rate", 60));
     config.max_fps = static_cast<int>(s.get_number("max_fps", 60));
     receiver_ = std::make_unique<Receiver>(*video_, *audio_);
