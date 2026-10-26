@@ -76,7 +76,7 @@ int App::run(HINSTANCE instance, const LaunchOptions& options) {
         sessions_.push_back(std::move(session));
     }
     for (auto& s : sessions_) {
-        s->window().show();
+        if (s->slot() == 0) s->window().show();  // extra slots appear when a phone connects to them
         if (playing) {
             s->start_files(options.play_video, options.play_audio);
         } else {

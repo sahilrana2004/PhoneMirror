@@ -11,6 +11,7 @@ bool Session::create(HINSTANCE instance) {
     audio_ = std::make_unique<AudioPipeline>();
     video_->set_recorder(&recorder_);
     audio_->set_recorder(&recorder_);
+    audio_->set_delay_ms(static_cast<int>(Settings::instance().get_number("audio_delay_ms", 0)));
     window_.attach({slot_, video_.get(), audio_.get(), &recorder_, control_});
     return true;
 }

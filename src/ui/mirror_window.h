@@ -53,7 +53,10 @@ private:
     int dip(int value) const { return MulDiv(value, static_cast<int>(dpi_), 96); }
 
     void show_hint(std::wstring text, UINT ms);
-    void on_click_to_control();
+    void on_click_to_control(POINT client_pt);
+    bool map_to_screen(POINT client_pt, float& nx, float& ny);
+    void start_calibration();
+    void finish_calibration(POINT client_pt);
     bool on_shortcut(UINT vk, bool ctrl, bool shift);
 
     // Hover bar.
@@ -83,6 +86,7 @@ private:
     HoverBarState bar_;
     float bar_target_ = 0;
     int pressed_ = -1;
+    bool calibrating_ = false;
     bool topmost_ = false;
     bool fullscreen_ = false;
     RECT windowed_rect_{};

@@ -257,9 +257,10 @@ void AudioPipeline::render_loop() {
 
             size_t read = read_pos_.load(std::memory_order_relaxed);
             size_t available = write_pos_.load(std::memory_order_acquire) - read;
-            if (!playing && available < kStartFrames) continue;
-            if (available + padding > kCeilingFrames) {
-                size_t excess = std::min(available, available + padding - kTargetFrames);
+            const size_t delay = static_cast<size_t>(extra_delay_frames_.load());  // "Sync audio to video" offset
+            if (!playing && available < kStartFrames + delay) continue;
+            if (available + padding > kCeilingFrames + delay) {
+                size_t excess = std::min(available, available + padding - kTargetFrames - delay);
                 read += excess;
                 available -= excess;
             }

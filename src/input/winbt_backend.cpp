@@ -88,6 +88,7 @@ struct WinBtBackend::Impl {
     bool mouse_dirty = false;
     std::deque<KeyboardState> keys;
     std::deque<uint16_t> consumer;
+    std::deque<std::pair<int, int>> steps;  // discrete (uncoalesced) motion reports
 
     // Minimum spacing of mouse reports: one per connection event, so motion is coalesced rather than queued.
     std::atomic<int> min_interval_us = 7500;
@@ -137,6 +138,19 @@ void WinBtBackend::mouse_buttons(uint8_t buttons) {
     std::lock_guard lock(impl_->mutex);
     impl_->buttons = buttons;
     impl_->mouse_dirty = true;
+    impl_->wake.notify_one();
+}
+
+void WinBtBackend::mouse_steps(int dx, int dy, int step) {
+    step = std::clamp(step, 1, 32767);
+    std::lock_guard lock(impl_->mutex);
+    while (dx || dy) {
+        int sx = std::clamp(dx, -step, step);
+        int sy = std::clamp(dy, -step, step);
+        impl_->steps.emplace_back(sx, sy);
+        dx -= sx;
+        dy -= sy;
+    }
     impl_->wake.notify_one();
 }
 
@@ -284,11 +298,12 @@ void WinBtBackend::Impl::run() {
         std::unique_lock lock(mutex);
         while (!stopping) {
             auto mouse_due = last_mouse + std::chrono::microseconds(min_interval_us.load());
-            bool mouse_ready = mouse_dirty && Clock::now() >= mouse_due;
+            bool mouse_ready = (mouse_dirty || !steps.empty()) && Clock::now() >= mouse_due;
             if (!keys.empty() || !consumer.empty() || mouse_ready) {
                 if (!connected) {  // nothing is listening: drop input instead of replaying it later
                     keys.clear();
                     consumer.clear();
+                    steps.clear();
                     mouse_dirty = false;
                     dx = dy = wheel = pan = 0;
                     continue;
@@ -305,6 +320,14 @@ void WinBtBackend::Impl::run() {
                     lock.unlock();
                     const uint8_t r[8] = {k.modifiers, 0, k.keys[0], k.keys[1], k.keys[2], k.keys[3], k.keys[4], k.keys[5]};
                     notify(keyboard_report, r, sizeof(r));
+                } else if (!steps.empty()) {
+                    auto [sx, sy] = steps.front();
+                    steps.pop_front();
+                    const uint8_t r[7] = {buttons, static_cast<uint8_t>(sx), static_cast<uint8_t>(sx >> 8),
+                                          static_cast<uint8_t>(sy), static_cast<uint8_t>(sy >> 8), 0, 0};
+                    last_mouse = Clock::now();
+                    lock.unlock();
+                    notify(mouse_report, r, sizeof(r));
                 } else {
                     int sx = std::clamp(dx, -32767, 32767);
                     int sy = std::clamp(dy, -32767, 32767);
@@ -335,7 +358,7 @@ void WinBtBackend::Impl::run() {
                 }
                 continue;
             }
-            if (mouse_dirty) {
+            if (mouse_dirty || !steps.empty()) {
                 wake.wait_until(lock, mouse_due);
             } else {
                 wake.wait(lock);

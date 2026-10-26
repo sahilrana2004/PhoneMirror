@@ -24,6 +24,7 @@ public:
     void mouse_move(int dx, int dy) override;
     void mouse_scroll(int wheel, int pan) override;
     void mouse_buttons(uint8_t buttons) override;
+    void mouse_steps(int dx, int dy, int step) override;
     void keyboard(const KeyboardState& state) override;
     void consumer_click(uint16_t usage) override;
 

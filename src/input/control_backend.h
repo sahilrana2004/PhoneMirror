@@ -33,6 +33,9 @@ public:
     virtual void mouse_move(int dx, int dy) = 0;
     virtual void mouse_scroll(int wheel, int pan) = 0;
     virtual void mouse_buttons(uint8_t buttons) = 0;  // bit0 left, bit1 right, bit2 middle
+    // Motion sent as discrete reports of at most `step` counts per axis (never coalesced), so the phone's
+    // pointer acceleration sees a constant speed: used for absolute positioning and calibration.
+    virtual void mouse_steps(int dx, int dy, int step) = 0;
     virtual void keyboard(const KeyboardState& state) = 0;
     virtual void consumer_click(uint16_t usage) = 0;
 };

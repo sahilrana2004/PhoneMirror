@@ -27,6 +27,8 @@ constexpr int kMinHeightDip = 320;
 constexpr UINT_PTR kHintTimer = 1;
 constexpr UINT_PTR kBarTimer = 2;
 constexpr UINT kBarTickMs = 33;
+constexpr int kPointerStep = 8;          // counts per report for absolute moves (constant speed)
+constexpr int kCalibrationCounts = 400;  // calibration walk from the corner, per axis
 
 // Segoe Fluent Icons / MDL2 Assets code points.
 constexpr wchar_t kGlyphHome = 0xE80F;
@@ -179,18 +181,72 @@ void MirrorWindow::show_hint(std::wstring text, UINT ms) {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
-void MirrorWindow::on_click_to_control() {
+void MirrorWindow::on_click_to_control(POINT pt) {
     if (!parts_.control) return;
-    if (capture_.begin()) return;
+    if (capture_.begin()) {
+        // Absolute sync (once calibrated): park the pointer in the top-left corner with one huge move, then
+        // walk it to the clicked spot in small constant steps so iOS pointer acceleration stays out of it.
+        Settings& s = Settings::instance();
+        double cal_x = s.get_number("pointer_cal_x", 0);
+        double cal_y = s.get_number("pointer_cal_y", 0);
+        float nx = 0, ny = 0;
+        if (cal_x > 0 && cal_y > 0 && map_to_screen(pt, nx, ny)) {
+            parts_.control->mouse_steps(-32767, -32767, 32767);
+            parts_.control->mouse_steps(static_cast<int>(nx * cal_x), static_cast<int>(ny * cal_y), kPointerStep);
+        }
+        return;
+    }
     wchar_t pc[MAX_COMPUTERNAME_LENGTH + 1] = {};
     DWORD len = ARRAYSIZE(pc);
     GetComputerNameW(pc, &len);
     show_hint(std::wstring(L"Keyboard/mouse not connected: on iPhone open Settings › Bluetooth › ") + pc, 5000);
 }
 
+// Client pixel -> position on the phone screen as 0..1 fractions; false outside the screen.
+bool MirrorWindow::map_to_screen(POINT pt, float& nx, float& ny) {
+    RECT rc;
+    GetClientRect(hwnd_, &rc);
+    geometry::Rect s = geometry::screen_rect(static_cast<float>(rc.right), static_cast<float>(rc.bottom),
+                                             renderer_.content_aspect());
+    nx = (static_cast<float>(pt.x) - s.x) / s.w;
+    ny = (static_cast<float>(pt.y) - s.y) / s.h;
+    return nx >= 0 && nx <= 1 && ny >= 0 && ny <= 1;
+}
+
+// Ctrl+Shift+P: move the pointer a known number of counts from the corner, user clicks where it landed.
+void MirrorWindow::start_calibration() {
+    if (!parts_.control || !parts_.control->connected()) {
+        on_click_to_control({-1, -1});
+        return;
+    }
+    capture_.end();
+    calibrating_ = true;
+    parts_.control->mouse_steps(-32767, -32767, 32767);
+    parts_.control->mouse_steps(kCalibrationCounts, kCalibrationCounts, kPointerStep);
+    show_hint(L"Pointer calibration: when the iPhone pointer stops moving, click exactly on it (Esc cancels)", 20000);
+}
+
+void MirrorWindow::finish_calibration(POINT pt) {
+    calibrating_ = false;
+    float nx = 0, ny = 0;
+    if (!map_to_screen(pt, nx, ny) || nx < 0.02f || ny < 0.02f) {
+        show_hint(L"Calibration cancelled: click on the pointer inside the phone screen", 3000);
+        return;
+    }
+    // Counts needed to cross the whole screen at the calibration step size.
+    double cal_x = kCalibrationCounts / nx;
+    double cal_y = kCalibrationCounts / ny;
+    Settings& s = Settings::instance();
+    s.set_number("pointer_cal_x", cal_x);
+    s.set_number("pointer_cal_y", cal_y);
+    s.save();
+    log::info("Pointer calibrated: {:.0f} x {:.0f} counts per screen", cal_x, cal_y);
+    show_hint(L"Pointer calibrated · clicking the screen now puts the pointer where you click", 3000);
+}
+
 void MirrorWindow::phone_action(uint16_t usage, int presses) {
     if (!parts_.control || !parts_.control->connected()) {
-        on_click_to_control();  // shows how to connect
+        on_click_to_control({-1, -1});  // not connected: shows how to connect
         return;
     }
     for (int i = 0; i < presses; ++i) parts_.control->consumer_click(usage);
@@ -367,6 +423,11 @@ bool MirrorWindow::on_shortcut(UINT vk, bool ctrl, bool shift) {
         take_screenshot();
     } else if (ctrl && shift && vk == 'R') {
         toggle_recording();
+    } else if (ctrl && shift && vk == 'P') {
+        start_calibration();
+    } else if (vk == VK_ESCAPE && calibrating_) {
+        calibrating_ = false;
+        show_hint(L"", 0);
     } else if (ctrl && !shift && vk == '1') {
         phone_action(kConsumerHome, 1);
     } else if (ctrl && !shift && vk == '2') {
@@ -376,7 +437,7 @@ bool MirrorWindow::on_shortcut(UINT vk, bool ctrl, bool shift) {
             parts_.control->keyboard({0x08, {0x2C}});  // Command+Space
             parts_.control->keyboard({});
         } else {
-            on_click_to_control();
+            on_click_to_control({-1, -1});
         }
     } else if (vk == VK_ESCAPE && fullscreen_) {
         toggle_fullscreen();
@@ -468,8 +529,12 @@ LRESULT MirrorWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_LBUTTONDOWN: {
         POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        if (calibrating_) {
+            finish_calibration(pt);
+            return 0;
+        }
         pressed_ = button_at(pt);
-        if (pressed_ < 0) on_click_to_control();
+        if (pressed_ < 0) on_click_to_control(pt);
         return 0;
     }
     case WM_LBUTTONUP: {

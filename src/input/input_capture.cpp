@@ -187,9 +187,9 @@ LRESULT CALLBACK InputCapture::keyboard_hook(int code, WPARAM wp, LPARAM lp) {
 
 // Returns true when the key is swallowed (sent to the phone or used as a local shortcut).
 bool InputCapture::on_key(const KBDLLHOOKSTRUCT& k, bool down) {
-    // App shortcuts stay with PhoneMirror while captured: F3 stats, F11 fullscreen, Ctrl+Shift+S/R.
+    // App shortcuts stay with PhoneMirror while captured: F3 stats, F11 fullscreen, Ctrl+Shift+S/R/P.
     bool ctrl_shift = (physical_mods_ & kCtrlBits) && (physical_mods_ & 0x22);
-    if (k.vkCode == VK_F3 || k.vkCode == VK_F11 || (ctrl_shift && (k.vkCode == 'S' || k.vkCode == 'R'))) {
+    if (k.vkCode == VK_F3 || k.vkCode == VK_F11 || (ctrl_shift && (k.vkCode == 'S' || k.vkCode == 'R' || k.vkCode == 'P'))) {
         if (down) PostMessageW(hwnd_, kMsgShortcut, k.vkCode, 0);
         return true;
     }

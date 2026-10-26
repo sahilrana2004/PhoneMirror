@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <mmdeviceapi.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <mutex>
@@ -40,6 +41,8 @@ public:
     bool muted() const { return muted_; }
     void set_local_volume(float volume) { local_volume_ = volume; }  // 0..1, on top of the phone's volume
     float local_volume() const { return local_volume_; }
+    // Holds audio back by this much (setting "audio_delay_ms") to line it up with the video on screen.
+    void set_delay_ms(int ms) { extra_delay_frames_ = std::clamp(ms, 0, 500) * 44100 / 1000; }
 
     // IMMNotificationClient: follow the Windows default output device.
     HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(EDataFlow flow, ERole role, LPCWSTR) override;
@@ -74,6 +77,7 @@ private:
     std::atomic<float> local_volume_ = 1.0f;
     std::atomic<bool> muted_ = false;
     std::atomic<bool> focus_muted_ = false;
+    std::atomic<int> extra_delay_frames_ = 0;
     std::atomic<Recorder*> recorder_ = nullptr;
     std::atomic<bool> running_ = true;
     std::atomic<bool> device_changed_ = false;
