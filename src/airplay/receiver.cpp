@@ -73,7 +73,9 @@ struct ReceiverCallbacks {
     }
     static void conn_destroy(void* cls) {
         Receiver& r = self(cls);
-        if (--r.connections_ == 0 && r.mirroring_.exchange(false)) r.sink_.on_mirror_stop();
+        if (--r.connections_ > 0) return;
+        r.audio_.on_audio_flush();
+        if (r.mirroring_.exchange(false)) r.sink_.on_mirror_stop();
     }
     static void conn_feedback(void* cls) { self(cls).last_feedback_ms_ = now_ms(); }
     static void conn_reset(void* cls, int reason) {
@@ -108,13 +110,17 @@ struct ReceiverCallbacks {
         *admit = true;
         self(cls).sink_.on_client(name ? name : "", model ? model : "");
     }
-    static void audio_process(void*, raop_ntp_t*, audio_decode_struct*) {}
-    static void audio_flush(void*) {}
+    static void audio_process(void* cls, raop_ntp_t*, audio_decode_struct* data) {
+        if (data->data_len > 0) {
+            self(cls).audio_.on_audio(data->data, static_cast<size_t>(data->data_len), data->ct);
+        }
+    }
+    static void audio_flush(void* cls) { self(cls).audio_.on_audio_flush(); }
     static void video_flush(void*) {}
     static void video_pause(void*) {}
     static void video_resume(void*) {}
     static double audio_set_client_volume(void*) { return 0.0; }
-    static void audio_set_volume(void*, float) {}
+    static void audio_set_volume(void* cls, float db) { self(cls).audio_.on_audio_volume(db); }
     static void audio_get_format(void*, unsigned char*, unsigned short*, bool*, bool*, uint64_t*) {}
     static void audio_set_metadata(void*, const void*, int) {}
     static void audio_set_coverart(void*, const void*, int) {}

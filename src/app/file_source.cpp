@@ -8,6 +8,7 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
 }
 
 #include "airplay/receiver.h"
@@ -66,9 +67,49 @@ bool FileSource::start(const std::filesystem::path& path, ReceiverSink& sink) {
     return true;
 }
 
+bool FileSource::start_audio(const std::filesystem::path& path, AudioSink& sink) {
+    AVFormatContext* fmt = nullptr;
+    if (avformat_open_input(&fmt, log::utf8(path.wstring()).c_str(), nullptr, nullptr) < 0 ||
+        avformat_find_stream_info(fmt, nullptr) < 0) {
+        log::error("--play-audio: cannot open {}", log::utf8(path.wstring()));
+        avformat_close_input(&fmt);
+        return false;
+    }
+    int index = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+    AVCodecID codec = index >= 0 ? fmt->streams[index]->codecpar->codec_id : AV_CODEC_ID_NONE;
+    int ct = codec == AV_CODEC_ID_ALAC ? 2 : codec == AV_CODEC_ID_AAC ? 4 : 0;
+    if (!ct) {
+        log::error("--play-audio: needs an AAC-LC or ALAC stream");
+        avformat_close_input(&fmt);
+        return false;
+    }
+    log::info("--play-audio: {} (ct {})", log::utf8(path.wstring()), ct);
+    running_ = true;
+    audio_thread_ = std::thread([this, fmt, index, ct, &sink]() mutable {
+        AVRational tb = fmt->streams[index]->time_base;
+        AVPacket* pkt = av_packet_alloc();
+        ULONGLONG start = GetTickCount64();
+        while (running_ && av_read_frame(fmt, pkt) >= 0) {
+            if (pkt->stream_index == index) {
+                if (pkt->pts != AV_NOPTS_VALUE) {  // AAC priming makes the first pts negative
+                    int64_t due_ms = pkt->pts * 1000 * tb.num / tb.den;
+                    auto now = static_cast<int64_t>(GetTickCount64() - start);
+                    if (due_ms > now) Sleep(static_cast<DWORD>(due_ms - now));
+                }
+                sink.on_audio(pkt->data, static_cast<size_t>(pkt->size), ct);
+            }
+            av_packet_unref(pkt);
+        }
+        av_packet_free(&pkt);
+        avformat_close_input(&fmt);
+    });
+    return true;
+}
+
 void FileSource::stop() {
     running_ = false;
     if (thread_.joinable()) thread_.join();
+    if (audio_thread_.joinable()) audio_thread_.join();
 }
 
 }  // namespace pm

@@ -7,6 +7,7 @@
 
 #include "airplay/receiver.h"
 #include "app/file_source.h"
+#include "audio/audio_pipeline.h"
 #include "app/tray.h"
 #include "ui/mirror_window.h"
 #include "video/pipeline.h"
@@ -37,6 +38,7 @@ private:
     MirrorWindow mirror_;
     // Destroyed in reverse: the receiver stops delivering before the pipeline and window go away.
     std::unique_ptr<VideoPipeline> pipeline_;
+    std::unique_ptr<AudioPipeline> audio_;
     std::unique_ptr<Receiver> receiver_;
     FileSource file_source_;
 };

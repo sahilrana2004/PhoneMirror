@@ -53,15 +53,19 @@ int App::run(HINSTANCE instance) {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     std::wstring play;
+    std::wstring play_audio;
     for (int i = 1; i + 1 < argc; ++i) {
         if (std::wstring_view(argv[i]) == L"--play") play = argv[i + 1];
+        if (std::wstring_view(argv[i]) == L"--play-audio") play_audio = argv[i + 1];
     }
     LocalFree(argv);
-    if (play.empty()) {
+    if (play.empty() && play_audio.empty()) {
         start_receiver();
     } else {
         pipeline_ = std::make_unique<VideoPipeline>(mirror_.renderer(), mirror_.hwnd());
-        file_source_.start(play, *pipeline_);
+        audio_ = std::make_unique<AudioPipeline>();
+        if (!play.empty()) file_source_.start(play, *pipeline_);
+        if (!play_audio.empty()) file_source_.start_audio(play_audio, *audio_);
     }
 
     MSG msg;
@@ -71,6 +75,7 @@ int App::run(HINSTANCE instance) {
     }
     file_source_.stop();
     receiver_.reset();
+    audio_.reset();
     pipeline_.reset();
     MdnsResponder::instance().shutdown();
     log::info("PhoneMirror exiting");
@@ -79,7 +84,8 @@ int App::run(HINSTANCE instance) {
 
 void App::start_receiver() {
     pipeline_ = std::make_unique<VideoPipeline>(mirror_.renderer(), mirror_.hwnd());
-    receiver_ = std::make_unique<Receiver>(*pipeline_);
+    audio_ = std::make_unique<AudioPipeline>();
+    receiver_ = std::make_unique<Receiver>(*pipeline_, *audio_);
     ReceiverConfig config;
     config.name = log::utf8(receiver_name_);
     // iOS sizes the stream from the requested height and only exceeds 1080 lines over H.265.

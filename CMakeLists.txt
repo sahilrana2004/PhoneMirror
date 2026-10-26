@@ -51,6 +51,7 @@ add_executable(PhoneMirror WIN32
   src/app/tray.cpp
   src/app/log.cpp
   src/app/file_source.cpp
+  src/audio/audio_pipeline.cpp
   src/airplay/receiver.cpp
   src/airplay/dnssd_mdns.cpp
   src/mdns/responder.cpp
@@ -68,4 +69,4 @@ target_compile_definitions(PhoneMirror PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_M
 target_compile_options(PhoneMirror PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4 /permissive- /utf-8 /Zc:__cplusplus /EHsc>)
 target_link_options(PhoneMirror PRIVATE /MANIFEST:NO)
 target_link_libraries(PhoneMirror PRIVATE uxplay ${FFMPEG_LIBRARIES}
-  d3d11 dxgi d2d1 dwrite dwmapi shell32 iphlpapi ws2_32)
+  d3d11 dxgi d2d1 dwrite dwmapi shell32 iphlpapi ws2_32 ole32 avrt)

@@ -6,18 +6,22 @@
 
 namespace pm {
 
+class AudioSink;
 class ReceiverSink;
 
-// Dev/benchmark input: replays an Annex-B .h264/.h265 file through the live pipeline at 60 fps,
-// one access unit per call, exactly as the AirPlay mirror stream delivers it. Started by --play <file>.
+// Dev/benchmark inputs that drive the live pipelines without a phone:
+//  --play <file.h264|h265>   Annex-B video, one access unit per call at 60 fps, as the mirror stream delivers it.
+//  --play-audio <file.m4a>   AAC-LC (44.1 kHz stereo) or ALAC packets in real time, as AirPlay audio delivers them.
 class FileSource {
 public:
     ~FileSource() { stop(); }
     bool start(const std::filesystem::path& path, ReceiverSink& sink);
+    bool start_audio(const std::filesystem::path& path, AudioSink& sink);
     void stop();
 
 private:
     std::thread thread_;
+    std::thread audio_thread_;
     std::atomic<bool> running_ = false;
 };
 

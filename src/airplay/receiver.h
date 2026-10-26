@@ -25,6 +25,15 @@ public:
     virtual void on_video(const uint8_t* data, size_t size, bool h265) = 0;
 };
 
+class AudioSink {
+public:
+    virtual ~AudioSink() = default;
+    // One compressed frame; compression_type is AirPlay's ct (2 ALAC, 4 AAC-LC, 8 AAC-ELD).
+    virtual void on_audio(const uint8_t* data, size_t size, int compression_type) = 0;
+    virtual void on_audio_volume(float db) = 0;  // -30..0 dB, -144 = mute
+    virtual void on_audio_flush() = 0;
+};
+
 struct ReceiverConfig {
     std::string name = "PhoneMirror";
     int slot = 0;                    // distinguishes device ids / keys when several receivers run
@@ -43,7 +52,7 @@ ReceiverPorts receiver_ports(int slot);
 
 class Receiver {
 public:
-    explicit Receiver(ReceiverSink& sink) : sink_(sink) {}
+    Receiver(ReceiverSink& sink, AudioSink& audio) : sink_(sink), audio_(audio) {}
     Receiver(const Receiver&) = delete;
     Receiver& operator=(const Receiver&) = delete;
     ~Receiver();
@@ -57,6 +66,7 @@ private:
     void supervise();
 
     ReceiverSink& sink_;
+    AudioSink& audio_;
     ReceiverConfig config_;
     raop_s* raop_ = nullptr;
     dnssd_s* dnssd_ = nullptr;

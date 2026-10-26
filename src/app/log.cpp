@@ -22,7 +22,12 @@ void init() {
     CoTaskMemFree(appdata);
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
-    g_file = _wfsopen((dir / L"phonemirror.log").c_str(), L"w", _SH_DENYWR);
+    // Shared so a viewer (or a dying previous instance still holding a handle) never blocks logging;
+    // if the file is locked anyway, log next to it rather than not at all.
+    g_file = _wfsopen((dir / L"phonemirror.log").c_str(), L"w", _SH_DENYNO);
+    if (!g_file) {
+        g_file = _wfsopen((dir / std::format(L"phonemirror-{}.log", GetCurrentProcessId())).c_str(), L"w", _SH_DENYNO);
+    }
 }
 
 void write(std::string_view level, std::string_view message) {
