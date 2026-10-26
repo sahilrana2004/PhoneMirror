@@ -541,3 +541,11 @@ uint64_t raop_ntp_convert_local_time(raop_ntp_t *raop_ntp, uint64_t local_time) 
     MUTEX_UNLOCK(raop_ntp->sync_params_mutex);
     return (uint64_t) ((int64_t) local_time + offset);
 }
+
+/* PhoneMirror: round-trip delay (ns) of the best recent timing exchange, for the stats overlay */
+int64_t raop_ntp_get_sync_delay(raop_ntp_t* raop_ntp) {
+    MUTEX_LOCK(raop_ntp->sync_params_mutex);
+    int64_t delay = raop_ntp->sync_delay;
+    MUTEX_UNLOCK(raop_ntp->sync_params_mutex);
+    return delay;
+}

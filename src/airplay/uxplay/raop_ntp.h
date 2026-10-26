@@ -45,5 +45,7 @@ uint64_t raop_ntp_convert_local_time(raop_ntp_t *raop_ntp, uint64_t local_time);
 
 void  raop_ntp_set_video_arrival_offset(raop_ntp_t* raop_ntp, const uint64_t *offset);
 uint64_t raop_ntp_get_video_arrival_offset(raop_ntp_t* raop_ntp);
+/* PhoneMirror: round-trip delay (ns) of the best recent timing exchange, for the stats overlay */
+int64_t raop_ntp_get_sync_delay(raop_ntp_t* raop_ntp);
 
 #endif //RAOP_NTP_H

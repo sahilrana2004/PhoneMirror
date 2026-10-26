@@ -86,36 +86,34 @@ bool VideoDecoder::open(ID3D11Device* device, std::recursive_mutex& device_lock,
         return false;
     }
     packet_ = av_packet_alloc();
+    scratch_ = av_frame_alloc();
     log::info("Decoder open: {} (D3D11VA, low-delay)", h265 ? "H.265" : "H.264");
     return true;
 }
 
 void VideoDecoder::close() {
+    av_frame_free(&scratch_);
     av_packet_free(&packet_);
     avcodec_free_context(&ctx_);
     av_buffer_unref(&device_ref_);
 }
 
-AVFrame* VideoDecoder::decode(const uint8_t* data, size_t size) {
-    if (!ctx_) return nullptr;
+bool VideoDecoder::decode(const uint8_t* data, size_t size, AVFrame* out) {
+    if (!ctx_) return false;
     packet_->data = const_cast<uint8_t*>(data);
     packet_->size = static_cast<int>(size);
     int err = avcodec_send_packet(ctx_, packet_);
     if (err < 0 && err != AVERROR(EAGAIN)) {
         log::error("avcodec_send_packet: {}", av_error(err));
-        return nullptr;
+        return false;
     }
-    AVFrame* newest = nullptr;
-    for (;;) {
-        AVFrame* frame = av_frame_alloc();
-        if (avcodec_receive_frame(ctx_, frame) < 0) {
-            av_frame_free(&frame);
-            break;
-        }
-        av_frame_free(&newest);  // older picture superseded within the same input
-        newest = frame;
+    bool got = false;
+    while (avcodec_receive_frame(ctx_, scratch_) >= 0) {
+        av_frame_unref(out);  // only the newest picture of this input matters
+        av_frame_move_ref(out, scratch_);
+        got = true;
     }
-    return newest;
+    return got;
 }
 
 }  // namespace pm

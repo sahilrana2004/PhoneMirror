@@ -1,9 +1,15 @@
 #include "app/app.h"
 
+#include <shellapi.h>
 #include <windowsx.h>
 
+#include <algorithm>
+
 #include "app/log.h"
+#include "app/settings.h"
+#include "input/control_backend.h"
 #include "mdns/responder.h"
+#include "net/firewall.h"
 #include "resource.h"
 #include "version.h"
 
@@ -13,15 +19,28 @@ namespace {
 constexpr UINT kMsgTray = WM_APP + 2;
 
 enum MenuId : UINT {
-    kMenuToggle = 1,
+    kMenuShowAll = 1,
+    kMenuSettings,
+    kMenuFirewall,
     kMenuQuit,
+    kMenuWindowBase = 100,  // + slot: toggle that window
 };
+
+std::wstring widen(const std::string& s) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring out(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), out.data(), n);
+    return out;
+}
 
 }  // namespace
 
-int App::run(HINSTANCE instance) {
+int App::run(HINSTANCE instance, const LaunchOptions& options) {
     instance_ = instance;
     log::info("PhoneMirror {} starting", PM_VERSION_STRING);
+    Settings& settings = Settings::instance();
+    receiver_name_ = widen(settings.get_string("receiver_name", "PhoneMirror"));
+    int receivers = std::clamp(static_cast<int>(settings.get_number("receivers", 1)), 1, 4);
 
     WNDCLASSEXW wc{sizeof(wc)};
     wc.lpfnWndProc = &App::wndproc;
@@ -43,62 +62,39 @@ int App::run(HINSTANCE instance) {
         log::error("Tray icon could not be added");
     }
 
-    if (!mirror_.create(instance, receiver_name_)) {
-        MessageBoxW(nullptr, L"PhoneMirror could not initialize Direct3D 11. See %APPDATA%\\PhoneMirror\\phonemirror.log.",
-                    L"PhoneMirror", MB_ICONERROR);
-        return 1;
+    bool playing = !options.play_video.empty() || !options.play_audio.empty();
+    if (playing) receivers = 1;
+    for (int slot = 0; slot < receivers; ++slot) {
+        std::wstring name = slot == 0 ? receiver_name_ : std::format(L"{} ({})", receiver_name_, slot + 1);
+        auto session = std::make_unique<Session>(slot, name, &control_);
+        if (!session->create(instance)) {
+            MessageBoxW(nullptr, L"PhoneMirror could not initialize Direct3D 11. See %APPDATA%\\PhoneMirror\\phonemirror.log.",
+                        L"PhoneMirror", MB_ICONERROR);
+            return 1;
+        }
+        session->window().on_activated = [this](int active) { set_audio_focus(active); };
+        sessions_.push_back(std::move(session));
     }
-    mirror_.show();
-    mirror_.set_control(&control_);
-    control_.start(mirror_.hwnd());
-
-    int argc = 0;
-    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    std::wstring play;
-    std::wstring play_audio;
-    for (int i = 1; i + 1 < argc; ++i) {
-        if (std::wstring_view(argv[i]) == L"--play") play = argv[i + 1];
-        if (std::wstring_view(argv[i]) == L"--play-audio") play_audio = argv[i + 1];
+    for (auto& s : sessions_) {
+        s->window().show();
+        if (playing) {
+            s->start_files(options.play_video, options.play_audio);
+        } else {
+            s->start_receiver();
+        }
     }
-    LocalFree(argv);
-    if (play.empty() && play_audio.empty()) {
-        start_receiver();
-    } else {
-        pipeline_ = std::make_unique<VideoPipeline>(mirror_.renderer(), mirror_.hwnd());
-        audio_ = std::make_unique<AudioPipeline>();
-        if (!play.empty()) file_source_.start(play, *pipeline_);
-        if (!play_audio.empty()) file_source_.start_audio(play_audio, *audio_);
-    }
+    control_.start(hwnd_);
+    if (!playing) check_network_setup(hwnd_);
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
-    file_source_.stop();
-    receiver_.reset();
-    audio_.reset();
-    pipeline_.reset();
+    sessions_.clear();
     MdnsResponder::instance().shutdown();
     log::info("PhoneMirror exiting");
     return static_cast<int>(msg.wParam);
-}
-
-void App::start_receiver() {
-    pipeline_ = std::make_unique<VideoPipeline>(mirror_.renderer(), mirror_.hwnd());
-    audio_ = std::make_unique<AudioPipeline>();
-    receiver_ = std::make_unique<Receiver>(*pipeline_, *audio_);
-    ReceiverConfig config;
-    config.name = log::utf8(receiver_name_);
-    // iOS sizes the stream from the requested height and only exceeds 1080 lines over H.265.
-    config.h265 = mirror_.renderer().supports_hevc();
-    config.width = config.h265 ? 3840 : 1920;
-    config.height = config.h265 ? 2160 : 1080;
-    if (!receiver_->start(config)) {
-        receiver_.reset();
-        mirror_.set_status(L"AirPlay receiver failed to start",
-                           L"Another AirPlay receiver may be using TCP port 7000. Details in %APPDATA%\\PhoneMirror\\phonemirror.log");
-    }
 }
 
 LRESULT CALLBACK App::wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -121,7 +117,7 @@ LRESULT App::handle(UINT msg, WPARAM wp, LPARAM lp) {
         switch (LOWORD(lp)) {
         case NIN_SELECT:
         case NIN_KEYSELECT:
-            toggle_mirror();
+            show_all();
             return 0;
         case WM_CONTEXTMENU:
             show_tray_menu({GET_X_LPARAM(wp), GET_Y_LPARAM(wp)});
@@ -129,7 +125,10 @@ LRESULT App::handle(UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case kMsgShowWindow:
-        mirror_.show();
+        show_all();
+        return 0;
+    case kMsgControlState:  // the Bluetooth backend reports here; every window shows the change
+        for (auto& s : sessions_) PostMessageW(s->window().hwnd(), kMsgControlState, wp, lp);
         return 0;
     case WM_DESTROY:
         tray_.remove();
@@ -144,7 +143,14 @@ void App::show_tray_menu(POINT anchor) {
     std::wstring header = L"Receiver: " + receiver_name_;
     AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, header.c_str());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kMenuToggle, mirror_.visible() ? L"Hide window" : L"Show window");
+    for (auto& s : sessions_) {
+        UINT flags = MF_STRING | (s->window().visible() ? MF_CHECKED : MF_UNCHECKED);
+        AppendMenuW(menu, flags, kMenuWindowBase + s->slot(), s->name().c_str());
+    }
+    AppendMenuW(menu, MF_STRING, kMenuShowAll, L"Show all windows");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kMenuSettings, L"Open settings file");
+    AppendMenuW(menu, MF_STRING, kMenuFirewall, L"Check network && firewall setup");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuQuit, L"Quit PhoneMirror");
 
@@ -154,16 +160,34 @@ void App::show_tray_menu(POINT anchor) {
     PostMessageW(hwnd_, WM_NULL, 0, 0);
     DestroyMenu(menu);
 
-    if (cmd == kMenuToggle) toggle_mirror();
+    if (cmd == kMenuShowAll) show_all();
+    if (cmd == kMenuSettings) {
+        Settings::instance().save();
+        std::filesystem::path path = Settings::data_dir() / L"settings.json";
+        ShellExecuteW(nullptr, L"open", L"notepad.exe", path.c_str(), nullptr, SW_SHOWNORMAL);
+    }
+    if (cmd == kMenuFirewall) check_network_setup(hwnd_, true);
     if (cmd == kMenuQuit) quit();
+    if (cmd >= kMenuWindowBase) {
+        for (auto& s : sessions_) {
+            if (static_cast<int>(cmd - kMenuWindowBase) != s->slot()) continue;
+            if (s->window().visible()) {
+                s->window().hide();
+            } else {
+                s->window().show();
+            }
+        }
+    }
 }
 
-void App::toggle_mirror() {
-    if (mirror_.visible()) {
-        mirror_.hide();
-    } else {
-        mirror_.show();
-    }
+void App::show_all() {
+    for (auto& s : sessions_) s->window().show();
+}
+
+// With several phones, only the window in front plays sound (setting "audio_follows_focus").
+void App::set_audio_focus(int slot) {
+    bool follow = sessions_.size() > 1 && Settings::instance().get_bool("audio_follows_focus", true);
+    for (auto& s : sessions_) s->audio().set_focus_muted(follow && s->slot() != slot);
 }
 
 void App::quit() { DestroyWindow(hwnd_); }

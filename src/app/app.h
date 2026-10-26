@@ -2,47 +2,45 @@
 
 #include <windows.h>
 
+#include <filesystem>
 #include <memory>
 #include <string>
+#include <vector>
 
-#include "airplay/receiver.h"
-#include "app/file_source.h"
-#include "audio/audio_pipeline.h"
-#include "input/winbt_backend.h"
+#include "app/session.h"
 #include "app/tray.h"
-#include "ui/mirror_window.h"
-#include "video/pipeline.h"
+#include "input/winbt_backend.h"
 
 namespace pm {
 
 inline constexpr wchar_t kAppWindowClass[] = L"PhoneMirror.App";
 inline constexpr UINT kMsgShowWindow = WM_APP + 1;  // sent by a second instance
 
+struct LaunchOptions {
+    std::filesystem::path play_video;
+    std::filesystem::path play_audio;
+};
+
 class App {
 public:
-    int run(HINSTANCE instance);
+    int run(HINSTANCE instance, const LaunchOptions& options);
 
 private:
     static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp);
     void show_tray_menu(POINT anchor);
-    void toggle_mirror();
-    void start_receiver();
+    void show_all();
+    void set_audio_focus(int slot);
     void quit();
 
     HINSTANCE instance_ = nullptr;
     HWND hwnd_ = nullptr;
     UINT taskbar_created_ = 0;
     HICON tray_icon_ = nullptr;
-    std::wstring receiver_name_ = L"PhoneMirror";
+    std::wstring receiver_name_;
     Tray tray_;
-    WinBtBackend control_;
-    MirrorWindow mirror_;
-    // Destroyed in reverse: the receiver stops delivering before the pipeline and window go away.
-    std::unique_ptr<VideoPipeline> pipeline_;
-    std::unique_ptr<AudioPipeline> audio_;
-    std::unique_ptr<Receiver> receiver_;
-    FileSource file_source_;
+    WinBtBackend control_;  // one Bluetooth keyboard/mouse, used by whichever window has focus
+    std::vector<std::unique_ptr<Session>> sessions_;
 };
 
 }  // namespace pm

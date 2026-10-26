@@ -6,9 +6,12 @@
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <vector>
+
+#include "ui/hover_bar.h"
 
 namespace pm {
 
@@ -44,6 +47,15 @@ public:
     void set_screen_aspect(float aspect);
     void set_idle_text(std::wstring title, std::wstring detail);
     void set_overlay(std::wstring text);  // short hint pill over the screen; empty hides it
+    void set_stats(std::wstring text);
+    void set_stats_visible(bool visible);
+    bool stats_visible() const { return stats_visible_; }
+    void set_hover_bar(HoverBarState state);
+    void set_tearing_allowed(bool allowed) { tearing_allowed_ = allowed; }  // before init()
+
+    // Current video frame at its native resolution as top-down BGRA (no mask/bezel); false if no video.
+    bool capture_frame(std::vector<uint8_t>& bgra, UINT& width, UINT& height);
+    float content_aspect();
 
     ID3D11Device* device() const { return device_.Get(); }
     std::recursive_mutex& device_lock() { return lock_; }
@@ -64,6 +76,10 @@ private:
     void draw_and_present();
     void draw_idle_text();
     void draw_overlay();
+    void draw_stats();
+    void draw_hover_bar();
+    void draw_quad(ID3D11RenderTargetView* target, float vw, float vh, const float rect[4], float radius,
+                   const SliceViews* views);
     void handle_device_lost();
     const SliceViews* views_for(const VideoFrame& frame);
 
@@ -103,10 +119,20 @@ private:
     ComPtr<IDWriteFactory> dwrite_;
     ComPtr<IDWriteTextFormat> title_format_;
     ComPtr<IDWriteTextFormat> detail_format_;
+    ComPtr<IDWriteTextFormat> stats_format_;
 
     std::wstring title_;
     std::wstring detail_;
     std::wstring overlay_;
+    std::wstring stats_;
+    std::atomic<bool> stats_visible_ = false;
+    HoverBarState bar_;
+    bool tearing_allowed_ = true;
+    ComPtr<IDWriteTextFormat> glyph_format_;
+    ComPtr<ID2D1SolidColorBrush> accent_brush_;
+    ComPtr<ID2D1SolidColorBrush> red_brush_;
+    ComPtr<ID2D1SolidColorBrush> hover_brush_;
+    ComPtr<ID2D1LinearGradientBrush> bar_brush_;
 };
 
 }  // namespace pm

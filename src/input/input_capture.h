@@ -23,6 +23,10 @@ public:
         hwnd_ = hwnd;
         backend_ = backend;
     }
+    void configure(bool swap_ctrl_cmd, double pointer_gain) {
+        swap_ctrl_cmd_ = swap_ctrl_cmd;
+        pointer_gain_ = pointer_gain;
+    }
     bool active() const { return active_; }
     bool begin();
     void end();
@@ -55,11 +59,11 @@ private:
     LONG last_abs_x_ = -1;
     LONG last_abs_y_ = -1;
 
-    // Settings (fixed until the settings UI lands).
     bool swap_ctrl_cmd_ = true;  // Ctrl+C/V/Z behave as on Windows (Ctrl -> Command, Win -> Control)
     double pointer_gain_ = 1.0;
 };
 
 inline constexpr UINT kMsgReleaseCapture = WM_APP + 21;
+inline constexpr UINT kMsgShortcut = WM_APP + 22;  // wParam = virtual key of a local shortcut pressed while captured
 
 }  // namespace pm

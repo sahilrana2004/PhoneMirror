@@ -2,6 +2,8 @@
 
 #include <d3d10.h>
 
+#include <cstring>
+
 #include "app/log.h"
 #include "present_ps.h"
 #include "present_vs.h"
@@ -68,7 +70,8 @@ bool Renderer::init(HWND hwnd, UINT dpi) {
         return false;
     }
     BOOL allow_tearing = FALSE;
-    tearing_ = SUCCEEDED(factory_->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allow_tearing,
+    tearing_ = tearing_allowed_ &&
+               SUCCEEDED(factory_->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allow_tearing,
                                                        sizeof(allow_tearing))) &&
                allow_tearing;
 
@@ -83,6 +86,17 @@ bool Renderer::init(HWND hwnd, UINT dpi) {
                               DWRITE_FONT_STRETCH_NORMAL, 17.0f, L"en-us", &title_format_);
     dwrite_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
                               DWRITE_FONT_STRETCH_NORMAL, 13.0f, L"en-us", &detail_format_);
+    dwrite_->CreateTextFormat(L"Cascadia Mono", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+                              DWRITE_FONT_STRETCH_NORMAL, 11.0f, L"en-us", &stats_format_);
+    // Icon font: Segoe Fluent Icons on Windows 11, Segoe MDL2 Assets (same code points) on Windows 10.
+    ComPtr<IDWriteFontCollection> fonts;
+    dwrite_->GetSystemFontCollection(&fonts);
+    UINT32 index = 0;
+    BOOL fluent = FALSE;
+    if (fonts) fonts->FindFamilyName(L"Segoe Fluent Icons", &index, &fluent);
+    dwrite_->CreateTextFormat(fluent ? L"Segoe Fluent Icons" : L"Segoe MDL2 Assets", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                              DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 14.0f, L"en-us", &glyph_format_);
+    glyph_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     for (IDWriteTextFormat* f : {title_format_.Get(), detail_format_.Get()}) {
         f->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         f->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
@@ -177,7 +191,15 @@ bool Renderer::create_device() {
     d2d_ctx_->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 0.92f), &title_brush_);
     d2d_ctx_->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 0.55f), &detail_brush_);
     d2d_ctx_->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 0.62f), &overlay_brush_);
-    return vs_ && ps_ && params_ && sampler_;
+    d2d_ctx_->CreateSolidColorBrush(D2D1::ColorF(0.40f, 0.72f, 1.0f, 1.0f), &accent_brush_);
+    d2d_ctx_->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.27f, 0.23f, 1.0f), &red_brush_);
+    d2d_ctx_->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 1), &hover_brush_);
+    const D2D1_GRADIENT_STOP stops[] = {{0.0f, D2D1::ColorF(0, 0, 0, 0.72f)}, {1.0f, D2D1::ColorF(0, 0, 0, 0.0f)}};
+    ComPtr<ID2D1GradientStopCollection> collection;
+    d2d_ctx_->CreateGradientStopCollection(stops, 2, &collection);
+    d2d_ctx_->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties(D2D1::Point2F(0, 0), D2D1::Point2F(0, 1)),
+                                        collection.Get(), &bar_brush_);
+    return vs_ && ps_ && params_ && sampler_ && bar_brush_;
 }
 
 bool Renderer::create_swapchain() {
@@ -337,24 +359,86 @@ const Renderer::SliceViews* Renderer::views_for(const VideoFrame& frame) {
     return &views_.back();
 }
 
+float Renderer::content_aspect() {
+    std::lock_guard lock(lock_);
+    return has_frame_ ? static_cast<float>(frame_.width) / static_cast<float>(frame_.height) : screen_aspect_;
+}
+
 void Renderer::draw_and_present() {
     if (!swapchain_ || !rtv_) return;
 
     float aspect = has_frame_ ? static_cast<float>(frame_.width) / static_cast<float>(frame_.height) : screen_aspect_;
     geometry::Rect screen = geometry::screen_rect(static_cast<float>(width_), static_cast<float>(height_), aspect);
+    const float rect[4] = {screen.x, screen.y, screen.x + screen.w, screen.y + screen.h};
+    const SliceViews* views = has_frame_ ? views_for(frame_) : nullptr;
+    draw_quad(rtv_.Get(), static_cast<float>(width_), static_cast<float>(height_), rect,
+              geometry::kCorner * std::min(screen.w, screen.h), views);
+
+    if (!views) draw_idle_text();
+    draw_hover_bar();
+    draw_overlay();
+    draw_stats();
+
+    HRESULT hr = swapchain_->Present(0, tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0);
+    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
+        log::error("Device lost: 0x{:08X}", hex(device_->GetDeviceRemovedReason()));
+        handle_device_lost();
+    }
+}
+
+bool Renderer::capture_frame(std::vector<uint8_t>& bgra, UINT& width, UINT& height) {
+    std::lock_guard lock(lock_);
+    const SliceViews* views = has_frame_ ? views_for(frame_) : nullptr;
+    if (!views) return false;
+    width = frame_.width;
+    height = frame_.height;
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = width;
+    td.Height = height;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET;
+    ComPtr<ID3D11Texture2D> target;
+    ComPtr<ID3D11RenderTargetView> rtv;
+    if (FAILED(device_->CreateTexture2D(&td, nullptr, &target)) ||
+        FAILED(device_->CreateRenderTargetView(target.Get(), nullptr, &rtv))) {
+        return false;
+    }
+    const float rect[4] = {0, 0, static_cast<float>(width), static_cast<float>(height)};
+    draw_quad(rtv.Get(), static_cast<float>(width), static_cast<float>(height), rect, 0.0f, views);
+
+    td.BindFlags = 0;
+    td.Usage = D3D11_USAGE_STAGING;
+    td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> staging;
+    if (FAILED(device_->CreateTexture2D(&td, nullptr, &staging))) return false;
+    ctx_->CopyResource(staging.Get(), target.Get());
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    if (FAILED(ctx_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return false;
+    bgra.resize(static_cast<size_t>(width) * height * 4);
+    for (UINT y = 0; y < height; ++y) {
+        std::memcpy(&bgra[static_cast<size_t>(y) * width * 4], static_cast<const uint8_t*>(mapped.pData) + y * mapped.RowPitch,
+                    static_cast<size_t>(width) * 4);
+    }
+    ctx_->Unmap(staging.Get(), 0);
+    if (rtv_) ctx_->OMSetRenderTargets(1, rtv_.GetAddressOf(), nullptr);
+    return true;
+}
+
+// Full-target pass: rounded phone screen (video or idle gradient) inside the bezel colour.
+void Renderer::draw_quad(ID3D11RenderTargetView* target, float vw, float vh, const float rect[4], float radius,
+                         const SliceViews* views) {
     PresentParams p{};
-    p.viewport[0] = static_cast<float>(width_);
-    p.viewport[1] = static_cast<float>(height_);
-    p.corner_radius = geometry::kCorner * std::min(screen.w, screen.h);
-    p.screen_rect[0] = screen.x;
-    p.screen_rect[1] = screen.y;
-    p.screen_rect[2] = screen.x + screen.w;
-    p.screen_rect[3] = screen.y + screen.h;
+    p.viewport[0] = vw;
+    p.viewport[1] = vh;
+    p.corner_radius = radius;
+    std::copy_n(rect, 4, p.screen_rect);
     std::copy_n(kBezelColor, 4, p.bezel_color);
     std::copy_n(kIdleTop, 4, p.bg_top);
     std::copy_n(kIdleBottom, 4, p.bg_bottom);
 
-    const SliceViews* views = has_frame_ ? views_for(frame_) : nullptr;
     if (views) {
         D3D11_TEXTURE2D_DESC desc;
         frame_.texture->GetDesc(&desc);
@@ -367,8 +451,8 @@ void Renderer::draw_and_present() {
     }
     ctx_->UpdateSubresource(params_.Get(), 0, nullptr, &p, 0, 0);
 
-    D3D11_VIEWPORT vp{0, 0, p.viewport[0], p.viewport[1], 0, 1};
-    ctx_->OMSetRenderTargets(1, rtv_.GetAddressOf(), nullptr);
+    D3D11_VIEWPORT vp{0, 0, vw, vh, 0, 1};
+    ctx_->OMSetRenderTargets(1, &target, nullptr);
     ctx_->RSSetViewports(1, &vp);
     ctx_->IASetInputLayout(nullptr);
     ctx_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -377,15 +461,66 @@ void Renderer::draw_and_present() {
     ctx_->PSSetConstantBuffers(0, 1, params_.GetAddressOf());
     ctx_->PSSetSamplers(0, 1, sampler_.GetAddressOf());
     ctx_->Draw(3, 0);
+}
 
-    if (!views) draw_idle_text();
-    draw_overlay();
+void Renderer::set_hover_bar(HoverBarState state) {
+    std::lock_guard lock(lock_);
+    bar_ = std::move(state);
+}
 
-    HRESULT hr = swapchain_->Present(0, tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0);
-    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
-        log::error("Device lost: 0x{:08X}", hex(device_->GetDeviceRemovedReason()));
-        handle_device_lost();
+void Renderer::draw_hover_bar() {
+    if (bar_.opacity <= 0.01f && !bar_.recording) return;
+    float scale = 96.0f / static_cast<float>(dpi_);
+    float aspect = has_frame_ ? static_cast<float>(frame_.width) / static_cast<float>(frame_.height) : screen_aspect_;
+    BarLayout l = hover_bar_layout(width_ * scale, height_ * scale, aspect, bar_.buttons.size());
+    float a = bar_.opacity;
+
+    d2d_ctx_->BeginDraw();
+    if (a > 0.01f) {
+        bar_brush_->SetOpacity(a);
+        bar_brush_->SetStartPoint(D2D1::Point2F(0, l.bar.y));
+        bar_brush_->SetEndPoint(D2D1::Point2F(0, l.bar.y + l.bar.h + 16.0f));
+        d2d_ctx_->FillRectangle(D2D1::RectF(l.bar.x, l.bar.y, l.bar.x + l.bar.w, l.bar.y + l.bar.h + 16.0f), bar_brush_.Get());
+
+        title_brush_->SetOpacity(0.92f * a);
+        if (l.title.w > 24.0f && !bar_.title.empty()) {
+            d2d_ctx_->DrawText(bar_.title.c_str(), static_cast<UINT32>(bar_.title.size()), detail_format_.Get(),
+                               D2D1::RectF(l.title.x, l.title.y + 11.0f, l.title.x + l.title.w, l.title.y + l.title.h),
+                               title_brush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
+        for (size_t i = 0; i < bar_.buttons.size(); ++i) {
+            const BarButton& b = bar_.buttons[i];
+            const geometry::Rect& r = l.buttons[i];
+            D2D1_ELLIPSE circle = D2D1::Ellipse(D2D1::Point2F(r.x + r.w / 2, r.y + r.h / 2), r.w / 2, r.h / 2);
+            if (static_cast<int>(i) == bar_.hovered) {
+                hover_brush_->SetOpacity(0.18f * a);
+                d2d_ctx_->FillEllipse(circle, hover_brush_.Get());
+            }
+            ID2D1SolidColorBrush* brush = title_brush_.Get();
+            if (b.action == BarAction::Record && b.active) {
+                brush = red_brush_.Get();
+            } else if (b.active) {
+                brush = accent_brush_.Get();
+            }
+            brush->SetOpacity(a);
+            const wchar_t glyph[2] = {b.glyph, 0};
+            d2d_ctx_->DrawText(glyph, 1, glyph_format_.Get(), D2D1::RectF(r.x, r.y + r.h * 0.22f, r.x + r.w, r.y + r.h),
+                               brush);
+            brush->SetOpacity(1.0f);
+        }
+        title_brush_->SetOpacity(1.0f);
     }
+    if (bar_.recording && !bar_.record_time.empty()) {
+        // Recording badge stays visible when the bar is hidden.
+        std::wstring badge = L"● " + bar_.record_time;
+        float cx = l.bar.x + l.bar.w / 2;
+        float y = l.bar.y + (a > 0.01f ? l.bar.h + 4.0f : 10.0f);
+        D2D1_RECT_F pill = D2D1::RectF(cx - 38.0f, y, cx + 38.0f, y + 22.0f);
+        d2d_ctx_->FillRoundedRectangle(D2D1::RoundedRect(pill, 11.0f, 11.0f), overlay_brush_.Get());
+        d2d_ctx_->DrawText(badge.c_str(), static_cast<UINT32>(badge.size()), detail_format_.Get(),
+                           D2D1::RectF(pill.left, pill.top + 2.0f, pill.right, pill.bottom), red_brush_.Get());
+    }
+    d2d_ctx_->EndDraw();
 }
 
 void Renderer::draw_idle_text() {
@@ -434,6 +569,33 @@ void Renderer::draw_overlay() {
     d2d_ctx_->EndDraw();
 }
 
+void Renderer::set_stats(std::wstring text) {
+    std::lock_guard lock(lock_);
+    stats_ = std::move(text);
+}
+
+void Renderer::set_stats_visible(bool visible) { stats_visible_ = visible; }
+
+void Renderer::draw_stats() {
+    if (!stats_visible_ || stats_.empty()) return;
+    float scale = 96.0f / static_cast<float>(dpi_);
+    float aspect = has_frame_ ? static_cast<float>(frame_.width) / static_cast<float>(frame_.height) : screen_aspect_;
+    geometry::Rect s = geometry::screen_rect(static_cast<float>(width_), static_cast<float>(height_), aspect);
+    ComPtr<IDWriteTextLayout> layout;
+    dwrite_->CreateTextLayout(stats_.c_str(), static_cast<UINT32>(stats_.size()), stats_format_.Get(),
+                              s.w * 0.92f * scale, 200.0f, &layout);
+    if (!layout) return;
+    DWRITE_TEXT_METRICS m;
+    layout->GetMetrics(&m);
+    float x = (s.x + s.w * 0.04f) * scale;
+    float y = (s.y + s.w * 0.04f) * scale + 40.0f;  // below the hover bar / status bar area
+    D2D1_RECT_F box = D2D1::RectF(x, y, x + m.width + 16.0f, y + m.height + 12.0f);
+    d2d_ctx_->BeginDraw();
+    d2d_ctx_->FillRoundedRectangle(D2D1::RoundedRect(box, 8.0f, 8.0f), overlay_brush_.Get());
+    d2d_ctx_->DrawTextLayout(D2D1::Point2F(x + 8.0f, y + 6.0f), layout.Get(), title_brush_.Get());
+    d2d_ctx_->EndDraw();
+}
+
 void Renderer::handle_device_lost() {
     // The decoder's surfaces die with the device; the next keyframe after a codec reset restores video.
     has_frame_ = false;
@@ -448,6 +610,10 @@ void Renderer::handle_device_lost() {
     title_brush_.Reset();
     detail_brush_.Reset();
     overlay_brush_.Reset();
+    accent_brush_.Reset();
+    red_brush_.Reset();
+    hover_brush_.Reset();
+    bar_brush_.Reset();
     d2d_ctx_.Reset();
     d2d_device_.Reset();
     sampler_.Reset();

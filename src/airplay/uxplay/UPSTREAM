@@ -1,2 +1,3 @@
 Vendored from https://github.com/FDH2/UxPlay lib/ at tag v1.73.7 (commit df67c212a433cf6dda3676dd40c097900d24e645), GPL-3.0.
 Local changes: dnssd.c removed (replaced by src/airplay/dnssd_mdns.cpp); CMakeLists removed.
+Local changes: raop_ntp_get_sync_delay() accessor added to raop_ntp.c/.h (stats overlay RTT).

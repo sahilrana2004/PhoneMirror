@@ -1,11 +1,18 @@
 #include "ui/mirror_window.h"
 
 #include <dwmapi.h>
+#include <shellapi.h>
+#include <shlobj.h>
 #include <windowsx.h>
 
 #include <cmath>
+#include <cstdio>
 
 #include "app/log.h"
+#include "app/settings.h"
+#include "audio/audio_pipeline.h"
+#include "record/recorder.h"
+#include "record/screenshot.h"
 #include "resource.h"
 #include "ui/phone_geometry.h"
 #include "video/pipeline.h"
@@ -18,6 +25,22 @@ constexpr int kResizeBorderDip = 8;
 constexpr int kTitleZoneDip = 44;
 constexpr int kMinHeightDip = 320;
 constexpr UINT_PTR kHintTimer = 1;
+constexpr UINT_PTR kBarTimer = 2;
+constexpr UINT kBarTickMs = 33;
+
+// Segoe Fluent Icons / MDL2 Assets code points.
+constexpr wchar_t kGlyphHome = 0xE80F;
+constexpr wchar_t kGlyphAppSwitcher = 0xE7C4;
+constexpr wchar_t kGlyphCamera = 0xE722;
+constexpr wchar_t kGlyphRecord = 0xE7C8;
+constexpr wchar_t kGlyphStop = 0xE71A;
+constexpr wchar_t kGlyphPin = 0xE718;
+constexpr wchar_t kGlyphPinned = 0xE840;
+constexpr wchar_t kGlyphVolume = 0xE767;
+constexpr wchar_t kGlyphMute = 0xE74F;
+constexpr wchar_t kGlyphStats = 0xE9D9;
+constexpr wchar_t kGlyphSettings = 0xE713;
+constexpr wchar_t kGlyphClose = 0xE8BB;
 
 void apply_dwm_style(HWND hwnd) {
     BOOL dark = TRUE;
@@ -31,50 +54,83 @@ void apply_dwm_style(HWND hwnd) {
     DwmExtendFrameIntoClientArea(hwnd, &margins);
 }
 
+bool contains(const geometry::Rect& r, float x, float y) { return x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h; }
+
+std::wstring widen(const std::string& s) {
+    if (s.empty()) return {};
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring out(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), out.data(), n);
+    return out;
+}
+
 }  // namespace
 
 MirrorWindow::~MirrorWindow() {
-    if (hwnd_) DestroyWindow(hwnd_);
+    if (hwnd_) {
+        save_placement();
+        DestroyWindow(hwnd_);
+    }
 }
 
-bool MirrorWindow::create(HINSTANCE instance, const std::wstring& receiver_name) {
+bool MirrorWindow::create(HINSTANCE instance, const std::wstring& receiver_name, int slot) {
     WNDCLASSEXW wc{sizeof(wc)};
-    wc.style = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc = &MirrorWindow::wndproc;
-    wc.hInstance = instance;
-    wc.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_APP));
-    wc.hIconSm = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
-                                               GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0));
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.lpszClassName = kClassName;
-    RegisterClassExW(&wc);
+    if (!GetClassInfoExW(instance, kClassName, &wc)) {
+        wc = {sizeof(wc)};
+        wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
+        wc.lpfnWndProc = &MirrorWindow::wndproc;
+        wc.hInstance = instance;
+        wc.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_APP));
+        wc.hIconSm = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
+                                                   GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0));
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.lpszClassName = kClassName;
+        RegisterClassExW(&wc);
+    }
 
+    slot_ = slot;
+    receiver_name_ = receiver_name;
     screen_aspect_ = geometry::kDefaultAspect;
     POINT origin{0, 0};
-    HMONITOR monitor = MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY);
     MONITORINFO mi{sizeof(mi)};
-    GetMonitorInfoW(monitor, &mi);
+    GetMonitorInfoW(MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY), &mi);
     const RECT& work = mi.rcWork;
     int height = static_cast<int>((work.bottom - work.top) * 0.78f);
     int width = static_cast<int>(std::lround(height * geometry::client_aspect(screen_aspect_)));
-    int x = work.left + ((work.right - work.left) - width) / 2;
-    int y = work.top + ((work.bottom - work.top) - height) / 2;
+    int x = work.left + ((work.right - work.left) - width) / 2 + slot * 40;
+    int y = work.top + ((work.bottom - work.top) - height) / 2 + slot * 40;
 
-    hwnd_ = CreateWindowExW(WS_EX_APPWINDOW, kClassName, L"PhoneMirror",
+    hwnd_ = CreateWindowExW(WS_EX_APPWINDOW, kClassName, receiver_name.c_str(),
                             WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX, x, y, width, height, nullptr,
                             nullptr, instance, this);
     if (!hwnd_) {
         log::error("CreateWindowExW failed: {}", GetLastError());
         return false;
     }
+    restore_placement();
     dpi_ = GetDpiForWindow(hwnd_);
     apply_dwm_style(hwnd_);
 
+    Settings& s = Settings::instance();
+    renderer_.set_tearing_allowed(s.get_bool("tearing", true));
     if (!renderer_.init(hwnd_, dpi_)) return false;
-    receiver_name_ = receiver_name;
+    renderer_.set_stats_visible(s.get_bool("stats", false));
     renderer_.set_idle_text(L"Waiting for iPhone…",
                             L"Open Control Center → Screen Mirroring → " + receiver_name_);
+    set_topmost(s.get_bool("always_on_top", false));
+    SetTimer(hwnd_, kBarTimer, kBarTickMs, nullptr);
     return true;
+}
+
+void MirrorWindow::attach(const SessionParts& parts) {
+    parts_ = parts;
+    capture_.attach(hwnd_, parts.control);
+    Settings& s = Settings::instance();
+    capture_.configure(s.get_bool("swap_ctrl_cmd", true), s.get_number("pointer_gain", 1.0));
+    capture_.on_state = [this](bool on) {
+        show_hint(on ? L"Controlling iPhone · Ctrl+Alt to release" : L"", on ? 3000 : 0);
+    };
+    build_buttons();
 }
 
 void MirrorWindow::set_status(std::wstring title, std::wstring detail) {
@@ -87,6 +143,8 @@ void MirrorWindow::apply_aspect(float aspect) {
     if (std::fabs(aspect - screen_aspect_) < 0.002f) return;
     screen_aspect_ = aspect;
     renderer_.set_screen_aspect(aspect);
+    if (fullscreen_) return;
+    capture_.end();
     RECT r;
     GetWindowRect(hwnd_, &r);
     int long_side = std::max(r.right - r.left, r.bottom - r.top);
@@ -105,20 +163,11 @@ void MirrorWindow::show() {
 
 void MirrorWindow::hide() {
     capture_.end();
+    save_placement();
     ShowWindow(hwnd_, SW_HIDE);
 }
 
-void MirrorWindow::set_control(IControlBackend* backend) {
-    control_ = backend;
-    capture_.attach(hwnd_, backend);
-    capture_.on_state = [this](bool on) {
-        if (on) {
-            show_hint(L"Controlling iPhone · Ctrl+Alt to release", 3000);
-        } else {
-            show_hint(L"", 0);
-        }
-    };
-}
+bool MirrorWindow::visible() const { return IsWindowVisible(hwnd_) && !IsIconic(hwnd_); }
 
 void MirrorWindow::show_hint(std::wstring text, UINT ms) {
     renderer_.set_overlay(std::move(text));
@@ -131,7 +180,7 @@ void MirrorWindow::show_hint(std::wstring text, UINT ms) {
 }
 
 void MirrorWindow::on_click_to_control() {
-    if (!control_) return;
+    if (!parts_.control) return;
     if (capture_.begin()) return;
     wchar_t pc[MAX_COMPUTERNAME_LENGTH + 1] = {};
     DWORD len = ARRAYSIZE(pc);
@@ -139,7 +188,228 @@ void MirrorWindow::on_click_to_control() {
     show_hint(std::wstring(L"Keyboard/mouse not connected: on iPhone open Settings › Bluetooth › ") + pc, 5000);
 }
 
-bool MirrorWindow::visible() const { return IsWindowVisible(hwnd_) && !IsIconic(hwnd_); }
+void MirrorWindow::phone_action(uint16_t usage, int presses) {
+    if (!parts_.control || !parts_.control->connected()) {
+        on_click_to_control();  // shows how to connect
+        return;
+    }
+    for (int i = 0; i < presses; ++i) parts_.control->consumer_click(usage);
+}
+
+// ---- hover bar -------------------------------------------------------------------------------------------
+
+void MirrorWindow::build_buttons() {
+    bool recording = parts_.recorder && parts_.recorder->active();
+    bool muted = parts_.audio && parts_.audio->muted();
+    bar_.buttons = {
+        {BarAction::Home, kGlyphHome},
+        {BarAction::AppSwitcher, kGlyphAppSwitcher},
+        {BarAction::Screenshot, kGlyphCamera},
+        {BarAction::Record, recording ? kGlyphStop : kGlyphRecord, recording},
+        {BarAction::Pin, topmost_ ? kGlyphPinned : kGlyphPin, topmost_},
+        {BarAction::Mute, muted ? kGlyphMute : kGlyphVolume, muted},
+        {BarAction::Stats, kGlyphStats, renderer_.stats_visible()},
+        {BarAction::Settings, kGlyphSettings},
+        {BarAction::Close, kGlyphClose},
+    };
+}
+
+BarLayout MirrorWindow::layout() const {
+    RECT rc;
+    GetClientRect(hwnd_, &rc);
+    float scale = 96.0f / static_cast<float>(dpi_);
+    return hover_bar_layout(rc.right * scale, rc.bottom * scale, const_cast<Renderer&>(renderer_).content_aspect(),
+                            bar_.buttons.size());
+}
+
+int MirrorWindow::button_at(POINT pt) const {
+    if (bar_.opacity < 0.5f) return -1;
+    float scale = 96.0f / static_cast<float>(dpi_);
+    BarLayout l = layout();
+    for (size_t i = 0; i < l.buttons.size(); ++i) {
+        if (contains(l.buttons[i], pt.x * scale, pt.y * scale)) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+// Polled at ~30 Hz: reveal the bar while the cursor is near the top of the window, fade otherwise.
+void MirrorWindow::update_bar(bool animate) {
+    POINT cursor;
+    GetCursorPos(&cursor);
+    RECT wr;
+    GetWindowRect(hwnd_, &wr);
+    bool inside = PtInRect(&wr, cursor) && visible() && !capture_.active();
+    POINT client = cursor;
+    ScreenToClient(hwnd_, &client);
+    bool near_top = inside && client.y < dip(kTitleZoneDip) * 2;
+    bar_target_ = near_top ? 1.0f : 0.0f;
+
+    float before = bar_.opacity;
+    int hovered_before = bar_.hovered;
+    if (animate) {
+        float step = kBarTickMs / 150.0f;  // 150 ms fade
+        bar_.opacity = bar_target_ > bar_.opacity ? std::min(1.0f, bar_.opacity + step) : std::max(0.0f, bar_.opacity - step);
+    }
+    bar_.hovered = near_top ? button_at(client) : -1;
+
+    std::wstring time;
+    if (parts_.recorder && parts_.recorder->active()) {
+        int secs = static_cast<int>(parts_.recorder->elapsed_seconds());
+        time = std::format(L"{:02}:{:02}", secs / 60, secs % 60);
+    }
+    bool recording = !time.empty();
+    std::wstring title = parts_.video && !parts_.video->client_name().empty() ? widen(parts_.video->client_name())
+                                                                               : receiver_name_;
+    bool changed = before != bar_.opacity || hovered_before != bar_.hovered || bar_.record_time != time ||
+                   bar_.recording != recording || bar_.title != title;
+    if (!changed) return;
+    bar_.record_time = std::move(time);
+    bar_.recording = recording;
+    bar_.title = std::move(title);
+    renderer_.set_hover_bar(bar_);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void MirrorWindow::run_action(BarAction action) {
+    switch (action) {
+    case BarAction::Home: phone_action(kConsumerHome, 1); break;
+    case BarAction::AppSwitcher: phone_action(kConsumerHome, 2); break;
+    case BarAction::Screenshot: take_screenshot(); break;
+    case BarAction::Record: toggle_recording(); break;
+    case BarAction::Pin:
+        set_topmost(!topmost_);
+        Settings::instance().set_bool("always_on_top", topmost_);
+        Settings::instance().save();
+        break;
+    case BarAction::Mute:
+        if (parts_.audio) {
+            parts_.audio->set_muted(!parts_.audio->muted());
+            show_hint(parts_.audio->muted() ? L"Muted" : L"Sound on", 1200);
+        }
+        break;
+    case BarAction::Stats:
+        renderer_.set_stats_visible(!renderer_.stats_visible());
+        Settings::instance().set_bool("stats", renderer_.stats_visible());
+        Settings::instance().save();
+        break;
+    case BarAction::Settings: {
+        Settings::instance().save();  // make sure the file exists with current values
+        std::filesystem::path path = Settings::data_dir() / L"settings.json";
+        ShellExecuteW(hwnd_, L"open", L"notepad.exe", path.c_str(), nullptr, SW_SHOWNORMAL);
+        show_hint(L"Settings apply on next start", 3000);
+        break;
+    }
+    case BarAction::Close: PostMessageW(hwnd_, WM_CLOSE, 0, 0); break;
+    }
+    build_buttons();
+    renderer_.set_hover_bar(bar_);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+// ---- actions ----------------------------------------------------------------------------------------------
+
+void MirrorWindow::take_screenshot() {
+    std::vector<uint8_t> pixels;
+    UINT w = 0, h = 0;
+    if (!renderer_.capture_frame(pixels, w, h)) {
+        show_hint(L"Nothing to capture yet", 1500);
+        return;
+    }
+    std::filesystem::path path = media_folder(FOLDERID_Pictures) / (timestamped_stem(L"PhoneMirror") + L".png");
+    bool saved = save_png(path, pixels, w, h);
+    if (Settings::instance().get_bool("screenshot_to_clipboard", true)) copy_image_to_clipboard(hwnd_, pixels, w, h);
+    log::info("Screenshot {}x{} -> {} ({})", w, h, log::utf8(path.wstring()), saved ? "ok" : "failed");
+    show_hint(saved ? L"Screenshot saved to Pictures\\PhoneMirror" : L"Screenshot failed", 2000);
+}
+
+void MirrorWindow::toggle_recording() {
+    if (!parts_.recorder) return;
+    if (parts_.recorder->active()) {
+        parts_.recorder->stop();
+        show_hint(L"Recording saved to Videos\\PhoneMirror", 2500);
+    } else {
+        parts_.recorder->start(media_folder(FOLDERID_Videos), timestamped_stem(L"PhoneMirror"));
+        show_hint(L"Recording…", 1500);
+    }
+    build_buttons();
+    renderer_.set_hover_bar(bar_);
+}
+
+void MirrorWindow::set_topmost(bool topmost) {
+    topmost_ = topmost;
+    SetWindowPos(hwnd_, topmost ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+// F11: cover the monitor (the flip-model swapchain then gets independent flip, the lowest-latency path).
+void MirrorWindow::toggle_fullscreen() {
+    capture_.end();
+    if (!fullscreen_) {
+        GetWindowRect(hwnd_, &windowed_rect_);
+        MONITORINFO mi{sizeof(mi)};
+        GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &mi);
+        fullscreen_ = true;
+        SetWindowPos(hwnd_, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left,
+                     mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_FRAMECHANGED);
+    } else {
+        fullscreen_ = false;
+        const RECT& r = windowed_rect_;
+        SetWindowPos(hwnd_, topmost_ ? HWND_TOPMOST : HWND_NOTOPMOST, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                     SWP_FRAMECHANGED);
+    }
+}
+
+bool MirrorWindow::on_shortcut(UINT vk, bool ctrl, bool shift) {
+    if (vk == VK_F3) {
+        run_action(BarAction::Stats);
+    } else if (vk == VK_F11) {
+        toggle_fullscreen();
+    } else if (ctrl && shift && vk == 'S') {
+        take_screenshot();
+    } else if (ctrl && shift && vk == 'R') {
+        toggle_recording();
+    } else if (ctrl && !shift && vk == '1') {
+        phone_action(kConsumerHome, 1);
+    } else if (ctrl && !shift && vk == '2') {
+        phone_action(kConsumerHome, 2);
+    } else if (ctrl && !shift && vk == '3') {
+        if (parts_.control && parts_.control->connected()) {
+            parts_.control->keyboard({0x08, {0x2C}});  // Command+Space
+            parts_.control->keyboard({});
+        } else {
+            on_click_to_control();
+        }
+    } else if (vk == VK_ESCAPE && fullscreen_) {
+        toggle_fullscreen();
+    } else {
+        return false;
+    }
+    return true;
+}
+
+void MirrorWindow::save_placement() const {
+    if (!hwnd_ || fullscreen_ || IsIconic(hwnd_)) return;
+    RECT r;
+    GetWindowRect(hwnd_, &r);
+    Settings& s = Settings::instance();
+    s.set_string(std::format("window.{}", slot_), std::format("{},{},{}", r.left, r.top, r.bottom - r.top));
+    s.save();
+}
+
+// Height and position are remembered per slot; width follows the content aspect.
+void MirrorWindow::restore_placement() {
+    std::string saved = Settings::instance().get_string(std::format("window.{}", slot_), "");
+    int x = 0, y = 0, h = 0;
+    if (saved.empty() || sscanf_s(saved.c_str(), "%d,%d,%d", &x, &y, &h) != 3 || h < 200) return;
+    int w = static_cast<int>(std::lround(h * geometry::client_aspect(screen_aspect_)));
+    RECT r{x, y, x + w, y + h};
+    MONITORINFO mi{sizeof(mi)};
+    GetMonitorInfoW(MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST), &mi);
+    RECT visible_part;
+    if (!IntersectRect(&visible_part, &r, &mi.rcWork)) return;  // monitor gone: keep the centred default
+    SetWindowPos(hwnd_, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+// ---- window procedure ------------------------------------------------------------------------------------
 
 LRESULT CALLBACK MirrorWindow::wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_NCCREATE) {
@@ -154,20 +424,6 @@ LRESULT CALLBACK MirrorWindow::wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 LRESULT MirrorWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
     if (LRESULT captured = 0; capture_.handle(msg, wp, lp, captured)) return captured;
     switch (msg) {
-    case WM_LBUTTONDOWN:
-        on_click_to_control();
-        return 0;
-    case WM_TIMER:
-        if (wp == kHintTimer) show_hint(L"", 0);
-        return 0;
-    case kMsgControlState:
-        if (wp) {
-            show_hint(L"iPhone keyboard & mouse connected · click to control", 3000);
-        } else {
-            capture_.end();
-            show_hint(L"iPhone keyboard & mouse disconnected", 3000);
-        }
-        return 0;
     case WM_NCCALCSIZE:
         return 0;  // client area covers the whole window, including the creation-time call with wp == FALSE
     case WM_NCHITTEST:
@@ -176,7 +432,7 @@ LRESULT MirrorWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == HTCAPTION) return 0;  // no maximize on title double-click
         break;
     case WM_SIZING:
-        on_sizing(wp, reinterpret_cast<RECT*>(lp));
+        if (!fullscreen_) on_sizing(wp, reinterpret_cast<RECT*>(lp));
         return TRUE;
     case WM_GETMINMAXINFO: {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
@@ -190,6 +446,9 @@ LRESULT MirrorWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
             renderer_.render();
         }
         return 0;
+    case WM_EXITSIZEMOVE:
+        save_placement();
+        return 0;
     case WM_DPICHANGED: {
         dpi_ = HIWORD(wp);
         renderer_.set_dpi(dpi_);
@@ -198,13 +457,64 @@ LRESULT MirrorWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
                      SWP_NOZORDER | SWP_NOACTIVATE);
         return 0;
     }
+    case WM_ACTIVATE:
+        if (LOWORD(wp) != WA_INACTIVE && on_activated) on_activated(slot_);
+        break;
     case WM_ERASEBKGND:
         return 1;
     case WM_PAINT:
         renderer_.render();
         ValidateRect(hwnd_, nullptr);
         return 0;
+    case WM_LBUTTONDOWN: {
+        POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        pressed_ = button_at(pt);
+        if (pressed_ < 0) on_click_to_control();
+        return 0;
+    }
+    case WM_LBUTTONUP: {
+        POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        int idx = button_at(pt);
+        if (idx >= 0 && idx == pressed_ && idx < static_cast<int>(bar_.buttons.size())) run_action(bar_.buttons[idx].action);
+        pressed_ = -1;
+        return 0;
+    }
+    case WM_MOUSEWHEEL: {
+        POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        ScreenToClient(hwnd_, &pt);
+        int idx = button_at(pt);
+        if (idx >= 0 && bar_.buttons[idx].action == BarAction::Mute && parts_.audio) {
+            float v = parts_.audio->local_volume() + (GET_WHEEL_DELTA_WPARAM(wp) > 0 ? 0.05f : -0.05f);
+            v = std::clamp(v, 0.0f, 1.0f);
+            parts_.audio->set_local_volume(v);
+            show_hint(std::format(L"Volume {}%", static_cast<int>(std::lround(v * 100))), 1000);
+        }
+        return 0;
+    }
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN:
+        if (on_shortcut(static_cast<UINT>(wp), GetKeyState(VK_CONTROL) < 0, GetKeyState(VK_SHIFT) < 0)) return 0;
+        break;
+    case kMsgShortcut:
+        on_shortcut(static_cast<UINT>(wp), true, true);  // only reachable for F3/F11/Ctrl+Shift+S/R
+        return 0;
+    case WM_TIMER:
+        if (wp == kHintTimer) {
+            show_hint(L"", 0);
+        } else if (wp == kBarTimer) {
+            update_bar(true);
+        }
+        return 0;
+    case kMsgControlState:
+        if (wp) {
+            show_hint(L"iPhone keyboard & mouse connected · click to control", 3000);
+        } else {
+            capture_.end();
+            show_hint(L"iPhone keyboard & mouse disconnected", 3000);
+        }
+        return 0;
     case WM_CLOSE:
+        if (fullscreen_) toggle_fullscreen();
         hide();  // the receiver keeps running in the tray
         return 0;
     case kMsgMirrorStarted:
@@ -212,6 +522,7 @@ LRESULT MirrorWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case kMsgMirrorStopped:
         renderer_.clear_frame();
+        if (parts_.recorder && parts_.recorder->active()) toggle_recording();
         set_status(L"iPhone disconnected",
                    L"Reconnect from Control Center → Screen Mirroring → " + receiver_name_);
         return 0;
@@ -227,6 +538,7 @@ LRESULT MirrorWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 LRESULT MirrorWindow::hit_test(POINT pt) const {
+    if (fullscreen_) return HTCLIENT;
     RECT rc;
     GetWindowRect(hwnd_, &rc);
     int b = dip(kResizeBorderDip);
@@ -242,6 +554,9 @@ LRESULT MirrorWindow::hit_test(POINT pt) const {
     if (right) return HTRIGHT;
     if (top) return HTTOP;
     if (bottom) return HTBOTTOM;
+    POINT client = pt;
+    ScreenToClient(hwnd_, &client);
+    if (button_at(client) >= 0) return HTCLIENT;
     if (pt.y < rc.top + dip(kTitleZoneDip)) return HTCAPTION;
     return HTCLIENT;
 }

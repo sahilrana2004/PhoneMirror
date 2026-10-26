@@ -27,14 +27,15 @@ public:
     bool is_open() const { return ctx_ != nullptr; }
     bool is_h265() const { return h265_; }
 
-    // Feeds one Annex-B access unit. Returns the newest decoded picture (caller owns it, av_frame_free),
-    // or nullptr when the decoder produced nothing for this input.
-    AVFrame* decode(const uint8_t* data, size_t size);
+    // Feeds one Annex-B access unit. On true, `out` (an empty, caller-owned frame) holds the newest
+    // decoded picture; false when the decoder produced nothing for this input.
+    bool decode(const uint8_t* data, size_t size, AVFrame* out);
 
 private:
     AVBufferRef* device_ref_ = nullptr;
     AVCodecContext* ctx_ = nullptr;
     AVPacket* packet_ = nullptr;
+    AVFrame* scratch_ = nullptr;
     bool h265_ = false;
 };
 

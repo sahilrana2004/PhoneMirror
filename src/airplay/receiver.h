@@ -23,6 +23,8 @@ public:
     virtual void on_video_size(int width, int height) = 0;
     // Annex-B access unit (start-code prefixed NALs, parameter sets inline). Valid only during the call.
     virtual void on_video(const uint8_t* data, size_t size, bool h265) = 0;
+    // Round trip of AirPlay's timing channel, refreshed every couple of seconds while mirroring.
+    virtual void on_link_rtt(double ms) = 0;
 };
 
 class AudioSink {
@@ -80,6 +82,7 @@ private:
     std::atomic<int> connections_ = 0;
     std::atomic<uint64_t> last_feedback_ms_ = 0;
     std::atomic<bool> mirroring_ = false;
+    int frames_since_rtt_ = 0;  // mirror thread only
 };
 
 }  // namespace pm

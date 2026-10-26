@@ -14,6 +14,7 @@ extern "C" {
 }
 
 #include "app/log.h"
+#include "record/recorder.h"
 
 namespace pm {
 namespace {
@@ -165,15 +166,23 @@ void AudioPipeline::on_audio(const uint8_t* data, size_t size, int ct) {
 
 void AudioPipeline::push(const AVFrame* f) {
     int channels = f->ch_layout.nb_channels;
+    auto frames = static_cast<size_t>(f->nb_samples);
+    scratch_.resize(frames * kChannels);
+    for (size_t i = 0; i < frames; ++i) {
+        float l = sample(f, 0, static_cast<int>(i));
+        scratch_[i * 2] = l;
+        scratch_[i * 2 + 1] = channels > 1 ? sample(f, 1, static_cast<int>(i)) : l;
+    }
+    if (Recorder* r = recorder_.load()) r->push_audio(scratch_.data(), static_cast<int>(frames));
+
     size_t write = write_pos_.load(std::memory_order_relaxed);
     size_t read = read_pos_.load(std::memory_order_acquire);
     size_t space = kRingFrames - (write - read);
-    size_t n = std::min(static_cast<size_t>(f->nb_samples), space);  // full ring: newest audio is dropped
+    size_t n = std::min(frames, space);  // full ring: newest audio is dropped
     for (size_t i = 0; i < n; ++i) {
         size_t slot = ((write + i) % kRingFrames) * kChannels;
-        float l = sample(f, 0, static_cast<int>(i));
-        ring_[slot] = l;
-        ring_[slot + 1] = channels > 1 ? sample(f, 1, static_cast<int>(i)) : l;
+        ring_[slot] = scratch_[i * 2];
+        ring_[slot + 1] = scratch_[i * 2 + 1];
     }
     write_pos_.store(write + n, std::memory_order_release);
     SetEvent(wake_);
@@ -258,7 +267,7 @@ void AudioPipeline::render_loop() {
             if (n) {
                 BYTE* out = nullptr;
                 if (FAILED(render->GetBuffer(static_cast<UINT32>(n), &out))) break;
-                float gain = gain_.load(std::memory_order_relaxed);
+                float gain = (muted_ || focus_muted_) ? 0.0f : gain_.load(std::memory_order_relaxed) * local_volume_.load(std::memory_order_relaxed);
                 auto* dst = reinterpret_cast<float*>(out);
                 for (size_t i = 0; i < n; ++i) {
                     size_t slot = ((read + i) % kRingFrames) * kChannels;

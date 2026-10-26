@@ -13,6 +13,7 @@ extern "C" {
 #include "dnssd.h"
 #include "logger.h"
 #include "raop.h"
+#include "raop_ntp.h"
 #include "stream.h"
 }
 
@@ -101,8 +102,13 @@ struct ReceiverCallbacks {
         log::info("AirPlay: source {}x{}, stream {}x{}", *ws, *hs, *w, *h);
         self(cls).sink_.on_video_size(static_cast<int>(*w), static_cast<int>(*h));
     }
-    static void video_process(void* cls, raop_ntp_t*, video_decode_struct* data) {
-        self(cls).sink_.on_video(data->data, static_cast<size_t>(data->data_len), data->is_h265);
+    static void video_process(void* cls, raop_ntp_t* ntp, video_decode_struct* data) {
+        Receiver& r = self(cls);
+        r.sink_.on_video(data->data, static_cast<size_t>(data->data_len), data->is_h265);
+        if (ntp && ++r.frames_since_rtt_ >= 120) {
+            r.frames_since_rtt_ = 0;
+            r.sink_.on_link_rtt(static_cast<double>(raop_ntp_get_sync_delay(ntp)) / 1e6);
+        }
     }
     static void report_client_request(void* cls, char* deviceid, char* model, char* name, bool* admit) {
         log::info("AirPlay: connection from \"{}\" ({}) id {}", name ? name : "", model ? model : "",
