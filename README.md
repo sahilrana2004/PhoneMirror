@@ -4,11 +4,12 @@ Low-latency iPhone screen mirroring and control for Windows. The iPhone mirrors 
 (Control Center › Screen Mirroring › PhoneMirror); the PC's mouse and keyboard control the iPhone over the PC's own
 Bluetooth. Native C++20 / Win32 / Direct3D 11, single portable exe.
 
-- Zero-copy hardware decode (D3D11VA, H.264 and H.265 up to 2160 lines), no jitter buffer, latency-1 flip-model
+- Zero-copy hardware decode (D3D11VA, H.264 and H.265 up to 2160 lines), no video jitter buffer, latency-1 flip-model
   swapchain with tearing, newest-frame-wins presentation, MMCSS threads, Wi-Fi streaming mode while mirroring.
 - Window styled after macOS iPhone Mirroring: phone-shaped, aspect-locked, follows rotation, hover title bar
   (Home, App Switcher, screenshot, record, pin, mute, stats, settings, close).
-- Audio (AAC-ELD/ALAC/AAC) via WASAPI with a 20 ms buffer; MP4 recording without re-encoding the video;
+- Audio (AAC-ELD/ALAC/AAC) via WASAPI with an adaptive buffer (50–300 ms, sized from Wi-Fi arrival gaps, drift
+  corrected by ±1.5% resampling, reset after pauses); MP4 recording without re-encoding the video;
   PNG screenshots; several phones at once (one window each).
 - Mouse/keyboard control as a Bluetooth LE HID device — no dongle.
 
