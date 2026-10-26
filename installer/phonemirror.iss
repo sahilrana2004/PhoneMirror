@@ -1,9 +1,9 @@
 ; Inno Setup 6 script for PhoneMirror. Build the Release exe first, then:
-;   ISCC.exe /DAppVersion=1.0.1 installer\phonemirror.iss
+;   ISCC.exe /DAppVersion=1.0.2 installer\phonemirror.iss
 ; Output: build\installer\PhoneMirror-Setup-<version>.exe
 
 #ifndef AppVersion
-  #define AppVersion "1.0.1"
+  #define AppVersion "1.0.2"
 #endif
 
 [Setup]
