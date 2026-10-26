@@ -2,10 +2,14 @@
 
 #include <windows.h>
 
+#include <memory>
 #include <string>
 
+#include "airplay/receiver.h"
+#include "app/file_source.h"
 #include "app/tray.h"
 #include "ui/mirror_window.h"
+#include "video/pipeline.h"
 
 namespace pm {
 
@@ -21,6 +25,7 @@ private:
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp);
     void show_tray_menu(POINT anchor);
     void toggle_mirror();
+    void start_receiver();
     void quit();
 
     HINSTANCE instance_ = nullptr;
@@ -30,6 +35,10 @@ private:
     std::wstring receiver_name_ = L"PhoneMirror";
     Tray tray_;
     MirrorWindow mirror_;
+    // Destroyed in reverse: the receiver stops delivering before the pipeline and window go away.
+    std::unique_ptr<VideoPipeline> pipeline_;
+    std::unique_ptr<Receiver> receiver_;
+    FileSource file_source_;
 };
 
 }  // namespace pm

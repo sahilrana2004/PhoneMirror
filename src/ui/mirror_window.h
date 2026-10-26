@@ -20,15 +20,19 @@ public:
     void hide();
     bool visible() const;
     HWND hwnd() const { return hwnd_; }
+    Renderer& renderer() { return renderer_; }
+    void set_status(std::wstring title, std::wstring detail);
 
 private:
     static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp);
     LRESULT hit_test(POINT screen_pt) const;
     void on_sizing(WPARAM edge, RECT* rect) const;
+    void apply_aspect(float aspect);
     int dip(int value) const { return MulDiv(value, static_cast<int>(dpi_), 96); }
 
     HWND hwnd_ = nullptr;
+    std::wstring receiver_name_;
     UINT dpi_ = 96;
     float screen_aspect_ = 0;
     Renderer renderer_;

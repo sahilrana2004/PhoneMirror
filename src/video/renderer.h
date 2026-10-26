@@ -6,12 +6,27 @@
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
+#include <mutex>
 #include <string>
+#include <vector>
 
 namespace pm {
 
 using Microsoft::WRL::ComPtr;
 
+// One decoded picture: a slice of the decoder's NV12/P010 texture array, sampled in place (zero-copy).
+struct VideoFrame {
+    ID3D11Texture2D* texture = nullptr;
+    UINT slice = 0;
+    UINT width = 0;
+    UINT height = 0;
+    bool full_range = false;
+    bool bt601 = false;
+};
+
+// Owns the device and swapchain. Every device-context use (including the FFmpeg decoder, through
+// device_lock()) is serialized on one recursive mutex; the frame-latency wait happens outside it so a
+// thread waiting for the display never stalls the decoder.
 class Renderer {
 public:
     Renderer() = default;
@@ -22,25 +37,42 @@ public:
     bool init(HWND hwnd, UINT dpi);
     void resize();
     void render();
+    void present_frame(const VideoFrame& frame);
+    void clear_frame();
 
     void set_dpi(UINT dpi);
-    void set_screen_aspect(float aspect) { screen_aspect_ = aspect; }
+    void set_screen_aspect(float aspect);
     void set_idle_text(std::wstring title, std::wstring detail);
 
+    ID3D11Device* device() const { return device_.Get(); }
+    std::recursive_mutex& device_lock() { return lock_; }
+    bool supports_hevc() const { return hevc_; }
+
 private:
+    struct SliceViews {
+        UINT slice;
+        ComPtr<ID3D11ShaderResourceView> y;
+        ComPtr<ID3D11ShaderResourceView> uv;
+    };
+
     bool create_device();
     bool create_swapchain();
     bool create_targets();
     void release_targets();
+    void wait_for_swapchain();
+    void draw_and_present();
     void draw_idle_text();
     void handle_device_lost();
+    const SliceViews* views_for(const VideoFrame& frame);
 
+    std::recursive_mutex lock_;
     HWND hwnd_ = nullptr;
     UINT width_ = 0;
     UINT height_ = 0;
     UINT dpi_ = 96;
     float screen_aspect_ = 0;
     bool tearing_ = false;
+    bool hevc_ = false;
     UINT swapchain_flags_ = 0;
     HANDLE frame_wait_ = nullptr;
 
@@ -52,6 +84,12 @@ private:
     ComPtr<ID3D11VertexShader> vs_;
     ComPtr<ID3D11PixelShader> ps_;
     ComPtr<ID3D11Buffer> params_;
+    ComPtr<ID3D11SamplerState> sampler_;
+
+    VideoFrame frame_;
+    bool has_frame_ = false;
+    ComPtr<ID3D11Texture2D> views_texture_;
+    std::vector<SliceViews> views_;
 
     ComPtr<ID2D1Factory3> d2d_factory_;
     ComPtr<ID2D1Device2> d2d_device_;

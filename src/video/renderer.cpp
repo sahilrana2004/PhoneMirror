@@ -1,5 +1,7 @@
 #include "video/renderer.h"
 
+#include <d3d10.h>
+
 #include "app/log.h"
 #include "present_ps.h"
 #include "present_vs.h"
@@ -11,11 +13,14 @@ namespace {
 struct alignas(16) PresentParams {
     float viewport[2];
     float corner_radius;
-    float pad0;
+    float has_video;
     float screen_rect[4];
     float bezel_color[4];
     float bg_top[4];
     float bg_bottom[4];
+    float yuv[3][4];
+    float uv_scale[2];
+    float pad1[2];
 };
 
 constexpr float kBezelColor[4] = {0.043f, 0.043f, 0.051f, 1};
@@ -23,6 +28,24 @@ constexpr float kIdleTop[4] = {0.075f, 0.082f, 0.110f, 1};
 constexpr float kIdleBottom[4] = {0.024f, 0.027f, 0.039f, 1};
 
 unsigned hex(HRESULT hr) { return static_cast<unsigned>(hr); }
+
+// Rows of the Y'CbCr -> R'G'B' affine transform for normalized texture values.
+void yuv_matrix(bool full_range, bool bt601, float out[3][4]) {
+    const float ys = full_range ? 1.0f : 255.0f / 219.0f;
+    const float cs = full_range ? 1.0f : 255.0f / 224.0f;
+    const float y0 = full_range ? 0.0f : 16.0f / 255.0f;
+    const float c0 = 128.0f / 255.0f;
+    const float rv = bt601 ? 1.402f : 1.5748f;
+    const float gu = bt601 ? -0.344136f : -0.187324f;
+    const float gv = bt601 ? -0.714136f : -0.468124f;
+    const float bu = bt601 ? 1.772f : 1.8556f;
+    const float r[4] = {ys, 0, cs * rv, -(ys * y0 + cs * rv * c0)};
+    const float g[4] = {ys, cs * gu, cs * gv, -(ys * y0 + cs * (gu + gv) * c0)};
+    const float b[4] = {ys, cs * bu, 0, -(ys * y0 + cs * bu * c0)};
+    std::copy_n(r, 4, out[0]);
+    std::copy_n(g, 4, out[1]);
+    std::copy_n(b, 4, out[2]);
+}
 
 }  // namespace
 
@@ -102,7 +125,7 @@ bool Renderer::create_device() {
     log::info("GPU: {}", log::utf8(desc.Description));
 
     const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
-    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
     HRESULT hr = E_FAIL;
 #ifndef NDEBUG
     hr = D3D11CreateDevice(chosen.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, flags | D3D11_CREATE_DEVICE_DEBUG, levels,
@@ -116,6 +139,20 @@ bool Renderer::create_device() {
         log::error("D3D11CreateDevice failed: 0x{:08X}", hex(hr));
         return false;
     }
+    ComPtr<ID3D10Multithread> mt;
+    if (SUCCEEDED(ctx_.As(&mt))) mt->SetMultithreadProtected(TRUE);
+
+    hevc_ = false;
+    ComPtr<ID3D11VideoDevice> video;
+    if (SUCCEEDED(device_.As(&video))) {
+        for (UINT i = 0, n = video->GetVideoDecoderProfileCount(); i < n; ++i) {
+            GUID profile;
+            if (SUCCEEDED(video->GetVideoDecoderProfile(i, &profile)) && profile == D3D11_DECODER_PROFILE_HEVC_VLD_MAIN) {
+                hevc_ = true;
+            }
+        }
+    }
+    log::info("Hardware HEVC decode: {}", hevc_ ? "yes" : "no");
 
     device_->CreateVertexShader(g_present_vs, sizeof(g_present_vs), nullptr, &vs_);
     device_->CreatePixelShader(g_present_ps, sizeof(g_present_ps), nullptr, &ps_);
@@ -124,6 +161,11 @@ bool Renderer::create_device() {
     bd.Usage = D3D11_USAGE_DEFAULT;
     bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     device_->CreateBuffer(&bd, nullptr, &params_);
+    D3D11_SAMPLER_DESC sd{};
+    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sd.MaxLOD = D3D11_FLOAT32_MAX;
+    device_->CreateSamplerState(&sd, &sampler_);
 
     ComPtr<IDXGIDevice> dxgi_device;
     device_.As(&dxgi_device);
@@ -134,7 +176,7 @@ bool Renderer::create_device() {
     }
     d2d_ctx_->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 0.92f), &title_brush_);
     d2d_ctx_->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 0.55f), &detail_brush_);
-    return vs_ && ps_ && params_;
+    return vs_ && ps_ && params_ && sampler_;
 }
 
 bool Renderer::create_swapchain() {
@@ -195,6 +237,7 @@ void Renderer::release_targets() {
 }
 
 void Renderer::resize() {
+    std::lock_guard lock(lock_);
     if (!swapchain_) return;
     RECT rc;
     GetClientRect(hwnd_, &rc);
@@ -214,6 +257,7 @@ void Renderer::resize() {
 }
 
 void Renderer::set_dpi(UINT dpi) {
+    std::lock_guard lock(lock_);
     dpi_ = dpi;
     if (d2d_target_) {
         release_targets();
@@ -221,21 +265,86 @@ void Renderer::set_dpi(UINT dpi) {
     }
 }
 
+void Renderer::set_screen_aspect(float aspect) {
+    std::lock_guard lock(lock_);
+    screen_aspect_ = aspect;
+}
+
 void Renderer::set_idle_text(std::wstring title, std::wstring detail) {
+    std::lock_guard lock(lock_);
     title_ = std::move(title);
     detail_ = std::move(detail);
 }
 
-void Renderer::render() {
-    if (!swapchain_ || !rtv_) return;
-    WaitForSingleObjectEx(frame_wait_, 100, TRUE);
+void Renderer::wait_for_swapchain() {
+    if (frame_wait_) WaitForSingleObjectEx(frame_wait_, 100, TRUE);
+}
 
-    geometry::Rect screen =
-        geometry::screen_rect(static_cast<float>(width_), static_cast<float>(height_), screen_aspect_);
+void Renderer::render() {
+    wait_for_swapchain();
+    std::lock_guard lock(lock_);
+    draw_and_present();
+}
+
+void Renderer::present_frame(const VideoFrame& frame) {
+    wait_for_swapchain();
+    std::lock_guard lock(lock_);
+    frame_ = frame;
+    has_frame_ = views_for(frame) != nullptr;
+    draw_and_present();
+}
+
+void Renderer::clear_frame() {
+    std::lock_guard lock(lock_);
+    has_frame_ = false;
+    frame_ = {};
+    views_.clear();
+    views_texture_.Reset();
+    if (ctx_) {
+        ID3D11ShaderResourceView* none[2] = {};
+        ctx_->PSSetShaderResources(0, 2, none);
+    }
+}
+
+const Renderer::SliceViews* Renderer::views_for(const VideoFrame& frame) {
+    if (views_texture_.Get() != frame.texture) {
+        views_.clear();
+        views_texture_ = frame.texture;
+    }
+    for (const SliceViews& v : views_) {
+        if (v.slice == frame.slice) return &v;
+    }
+    D3D11_TEXTURE2D_DESC desc;
+    frame.texture->GetDesc(&desc);
+    bool ten_bit = desc.Format == DXGI_FORMAT_P010;
+    D3D11_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+    sv.Texture2DArray.MipLevels = 1;
+    sv.Texture2DArray.FirstArraySlice = frame.slice;
+    sv.Texture2DArray.ArraySize = 1;
+    SliceViews v{frame.slice, nullptr, nullptr};
+    sv.Format = ten_bit ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
+    HRESULT hr = device_->CreateShaderResourceView(frame.texture, &sv, &v.y);
+    sv.Format = ten_bit ? DXGI_FORMAT_R16G16_UNORM : DXGI_FORMAT_R8G8_UNORM;
+    if (SUCCEEDED(hr)) hr = device_->CreateShaderResourceView(frame.texture, &sv, &v.uv);
+    if (FAILED(hr)) {
+        log::error("Cannot sample decoder surface (format {}, bind 0x{:X}): 0x{:08X}", static_cast<int>(desc.Format),
+                   desc.BindFlags, hex(hr));
+        return nullptr;
+    }
+    views_.push_back(std::move(v));
+    return &views_.back();
+}
+
+void Renderer::draw_and_present() {
+    if (!swapchain_ || !rtv_) return;
+
+    float aspect = has_frame_ ? static_cast<float>(frame_.width) / static_cast<float>(frame_.height) : screen_aspect_;
+    geometry::Rect screen = geometry::screen_rect(static_cast<float>(width_), static_cast<float>(height_), aspect);
     PresentParams p{};
     p.viewport[0] = static_cast<float>(width_);
     p.viewport[1] = static_cast<float>(height_);
-    p.corner_radius = geometry::kCorner * screen.w;
+    p.corner_radius = geometry::kCorner * std::min(screen.w, screen.h);
     p.screen_rect[0] = screen.x;
     p.screen_rect[1] = screen.y;
     p.screen_rect[2] = screen.x + screen.w;
@@ -243,6 +352,18 @@ void Renderer::render() {
     std::copy_n(kBezelColor, 4, p.bezel_color);
     std::copy_n(kIdleTop, 4, p.bg_top);
     std::copy_n(kIdleBottom, 4, p.bg_bottom);
+
+    const SliceViews* views = has_frame_ ? views_for(frame_) : nullptr;
+    if (views) {
+        D3D11_TEXTURE2D_DESC desc;
+        frame_.texture->GetDesc(&desc);
+        p.has_video = 1;
+        yuv_matrix(frame_.full_range, frame_.bt601, p.yuv);
+        p.uv_scale[0] = static_cast<float>(frame_.width) / static_cast<float>(desc.Width);
+        p.uv_scale[1] = static_cast<float>(frame_.height) / static_cast<float>(desc.Height);
+        ID3D11ShaderResourceView* srvs[2] = {views->y.Get(), views->uv.Get()};
+        ctx_->PSSetShaderResources(0, 2, srvs);
+    }
     ctx_->UpdateSubresource(params_.Get(), 0, nullptr, &p, 0, 0);
 
     D3D11_VIEWPORT vp{0, 0, p.viewport[0], p.viewport[1], 0, 1};
@@ -253,9 +374,10 @@ void Renderer::render() {
     ctx_->VSSetShader(vs_.Get(), nullptr, 0);
     ctx_->PSSetShader(ps_.Get(), nullptr, 0);
     ctx_->PSSetConstantBuffers(0, 1, params_.GetAddressOf());
+    ctx_->PSSetSamplers(0, 1, sampler_.GetAddressOf());
     ctx_->Draw(3, 0);
 
-    draw_idle_text();
+    if (!views) draw_idle_text();
 
     HRESULT hr = swapchain_->Present(0, tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0);
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
@@ -282,6 +404,10 @@ void Renderer::draw_idle_text() {
 }
 
 void Renderer::handle_device_lost() {
+    // The decoder's surfaces die with the device; the next keyframe after a codec reset restores video.
+    has_frame_ = false;
+    views_.clear();
+    views_texture_.Reset();
     release_targets();
     if (frame_wait_) {
         CloseHandle(frame_wait_);
@@ -292,6 +418,7 @@ void Renderer::handle_device_lost() {
     detail_brush_.Reset();
     d2d_ctx_.Reset();
     d2d_device_.Reset();
+    sampler_.Reset();
     params_.Reset();
     ps_.Reset();
     vs_.Reset();

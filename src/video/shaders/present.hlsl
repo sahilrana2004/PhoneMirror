@@ -1,12 +1,21 @@
 cbuffer Params : register(b0) {
     float2 viewport;
     float corner_radius;
-    float pad0;
+    float has_video;
     float4 screen_rect;  // x0, y0, x1, y1 in pixels
     float4 bezel_color;
     float4 bg_top;
     float4 bg_bottom;
+    float4 yuv_r;  // rgb channel = dot(row.xyz, yuv) + row.w
+    float4 yuv_g;
+    float4 yuv_b;
+    float2 uv_scale;  // decoded size / texture size (decoder surfaces are padded)
+    float2 pad1;
 };
+
+Texture2D<float> tex_y : register(t0);
+Texture2D<float2> tex_uv : register(t1);
+SamplerState samp : register(s0);
 
 struct VSOut {
     float4 pos : SV_Position;
@@ -31,7 +40,15 @@ float4 ps_main(VSOut i) : SV_Target {
     float2 size = screen_rect.zw - screen_rect.xy;
     float d = rounded_box(px - (screen_rect.xy + size * 0.5), size * 0.5, corner_radius);
     float coverage = saturate(0.5 - d);
-    float2 suv = (px - screen_rect.xy) / size;
-    float3 screen = lerp(bg_top.rgb, bg_bottom.rgb, saturate(suv.y));
+    float2 suv = saturate((px - screen_rect.xy) / size);
+    float3 screen;
+    if (has_video > 0.5) {
+        float2 tuv = suv * uv_scale;
+        float3 yuv = float3(tex_y.SampleLevel(samp, tuv, 0), tex_uv.SampleLevel(samp, tuv, 0));
+        screen = saturate(float3(dot(yuv_r.xyz, yuv) + yuv_r.w, dot(yuv_g.xyz, yuv) + yuv_g.w,
+                                 dot(yuv_b.xyz, yuv) + yuv_b.w));
+    } else {
+        screen = lerp(bg_top.rgb, bg_bottom.rgb, suv.y);
+    }
     return float4(lerp(bezel_color.rgb, screen, coverage), 1);
 }

@@ -3,6 +3,7 @@
 #include <windowsx.h>
 
 #include "app/log.h"
+#include "mdns/responder.h"
 #include "resource.h"
 #include "version.h"
 
@@ -49,13 +50,47 @@ int App::run(HINSTANCE instance) {
     }
     mirror_.show();
 
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    std::wstring play;
+    for (int i = 1; i + 1 < argc; ++i) {
+        if (std::wstring_view(argv[i]) == L"--play") play = argv[i + 1];
+    }
+    LocalFree(argv);
+    if (play.empty()) {
+        start_receiver();
+    } else {
+        pipeline_ = std::make_unique<VideoPipeline>(mirror_.renderer(), mirror_.hwnd());
+        file_source_.start(play, *pipeline_);
+    }
+
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+    file_source_.stop();
+    receiver_.reset();
+    pipeline_.reset();
+    MdnsResponder::instance().shutdown();
     log::info("PhoneMirror exiting");
     return static_cast<int>(msg.wParam);
+}
+
+void App::start_receiver() {
+    pipeline_ = std::make_unique<VideoPipeline>(mirror_.renderer(), mirror_.hwnd());
+    receiver_ = std::make_unique<Receiver>(*pipeline_);
+    ReceiverConfig config;
+    config.name = log::utf8(receiver_name_);
+    // iOS sizes the stream from the requested height and only exceeds 1080 lines over H.265.
+    config.h265 = mirror_.renderer().supports_hevc();
+    config.width = config.h265 ? 3840 : 1920;
+    config.height = config.h265 ? 2160 : 1080;
+    if (!receiver_->start(config)) {
+        receiver_.reset();
+        mirror_.set_status(L"AirPlay receiver failed to start",
+                           L"Another AirPlay receiver may be using TCP port 7000. Details in %APPDATA%\\PhoneMirror\\phonemirror.log");
+    }
 }
 
 LRESULT CALLBACK App::wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {

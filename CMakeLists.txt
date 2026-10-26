@@ -25,19 +25,47 @@ add_custom_command(
 
 configure_file(src/app/version.h.in ${SHADER_DIR}/version.h @ONLY)
 
+find_package(OpenSSL REQUIRED)
+find_package(unofficial-libplist CONFIG REQUIRED)
+find_package(FFMPEG REQUIRED)
+
+# Vendored UxPlay protocol layer (C). Its POSIX gaps are filled by src/airplay/posix; dnssd.c is
+# replaced by src/airplay/dnssd_mdns.cpp, linked into the executable.
+file(GLOB UXPLAY_SOURCES CONFIGURE_DEPENDS
+  src/airplay/uxplay/*.c src/airplay/uxplay/playfair/*.c src/airplay/uxplay/llhttp/*.c)
+add_library(uxplay STATIC ${UXPLAY_SOURCES})
+target_include_directories(uxplay
+  PUBLIC src/airplay/uxplay
+  PRIVATE src/airplay/posix src/airplay/uxplay/playfair src/airplay/uxplay/llhttp)
+target_compile_definitions(uxplay
+  PUBLIC OPENSSL_API_COMPAT=0x10101000L
+  PRIVATE WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE _WINSOCK_DEPRECATED_NO_WARNINGS
+          NOHOLD PLIST_210 PLIST_230)
+target_compile_options(uxplay PRIVATE /std:c17 /W0 /utf-8
+  /FI${CMAKE_CURRENT_SOURCE_DIR}/src/airplay/posix/posix_compat.h)
+target_link_libraries(uxplay PUBLIC OpenSSL::Crypto unofficial::libplist::libplist ws2_32 iphlpapi)
+
 add_executable(PhoneMirror WIN32
   src/app/main.cpp
   src/app/app.cpp
   src/app/tray.cpp
   src/app/log.cpp
+  src/app/file_source.cpp
+  src/airplay/receiver.cpp
+  src/airplay/dnssd_mdns.cpp
+  src/mdns/responder.cpp
   src/ui/mirror_window.cpp
   src/video/renderer.cpp
+  src/video/decoder.cpp
+  src/video/pipeline.cpp
   res/app.rc
   ${SHADER_DIR}/present_vs.h
   ${SHADER_DIR}/present_ps.h)
 
-target_include_directories(PhoneMirror PRIVATE src res ${SHADER_DIR})
+target_include_directories(PhoneMirror PRIVATE src res ${SHADER_DIR} ${FFMPEG_INCLUDE_DIRS})
+target_link_directories(PhoneMirror PRIVATE ${FFMPEG_LIBRARY_DIRS})
 target_compile_definitions(PhoneMirror PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(PhoneMirror PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4 /permissive- /utf-8 /Zc:__cplusplus /EHsc>)
 target_link_options(PhoneMirror PRIVATE /MANIFEST:NO)
-target_link_libraries(PhoneMirror PRIVATE d3d11 dxgi d2d1 dwrite dwmapi shell32)
+target_link_libraries(PhoneMirror PRIVATE uxplay ${FFMPEG_LIBRARIES}
+  d3d11 dxgi d2d1 dwrite dwmapi shell32 iphlpapi ws2_32)

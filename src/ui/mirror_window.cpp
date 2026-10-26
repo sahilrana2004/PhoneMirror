@@ -8,6 +8,7 @@
 #include "app/log.h"
 #include "resource.h"
 #include "ui/phone_geometry.h"
+#include "video/pipeline.h"
 
 namespace pm {
 namespace {
@@ -69,9 +70,31 @@ bool MirrorWindow::create(HINSTANCE instance, const std::wstring& receiver_name)
     apply_dwm_style(hwnd_);
 
     if (!renderer_.init(hwnd_, dpi_)) return false;
+    receiver_name_ = receiver_name;
     renderer_.set_idle_text(L"Waiting for iPhone…",
-                            L"Open Control Center → Screen Mirroring → " + receiver_name);
+                            L"Open Control Center → Screen Mirroring → " + receiver_name_);
     return true;
+}
+
+void MirrorWindow::set_status(std::wstring title, std::wstring detail) {
+    renderer_.set_idle_text(std::move(title), std::move(detail));
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+// Follows the stream's orientation: keep the window's long side and centre, swap the short side in.
+void MirrorWindow::apply_aspect(float aspect) {
+    if (std::fabs(aspect - screen_aspect_) < 0.002f) return;
+    screen_aspect_ = aspect;
+    renderer_.set_screen_aspect(aspect);
+    RECT r;
+    GetWindowRect(hwnd_, &r);
+    int long_side = std::max(r.right - r.left, r.bottom - r.top);
+    float ca = geometry::client_aspect(aspect);
+    int w = ca < 1 ? static_cast<int>(std::lround(long_side * ca)) : long_side;
+    int h = ca < 1 ? long_side : static_cast<int>(std::lround(long_side / ca));
+    int cx = (r.left + r.right) / 2;
+    int cy = (r.top + r.bottom) / 2;
+    SetWindowPos(hwnd_, nullptr, cx - w / 2, cy - h / 2, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 void MirrorWindow::show() {
@@ -133,6 +156,17 @@ LRESULT MirrorWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_CLOSE:
         hide();  // the receiver keeps running in the tray
+        return 0;
+    case kMsgMirrorStarted:
+        show();
+        return 0;
+    case kMsgMirrorStopped:
+        renderer_.clear_frame();
+        set_status(L"iPhone disconnected",
+                   L"Reconnect from Control Center → Screen Mirroring → " + receiver_name_);
+        return 0;
+    case kMsgVideoSize:
+        if (wp && lp) apply_aspect(static_cast<float>(wp) / static_cast<float>(lp));
         return 0;
     case WM_NCDESTROY:
         SetWindowLongPtrW(hwnd_, GWLP_USERDATA, 0);
