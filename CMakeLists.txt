@@ -63,6 +63,8 @@ add_executable(PhoneMirror WIN32
   src/input/input_capture.cpp
   src/input/keymap.cpp
   src/input/winbt_backend.cpp
+  src/lab/lab_phone.cpp
+  src/lab/lab_runner.cpp
   src/mdns/responder.cpp
   src/ui/mirror_window.cpp
   src/video/renderer.cpp
@@ -79,7 +81,7 @@ target_compile_options(PhoneMirror PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4 /permis
 target_link_options(PhoneMirror PRIVATE /MANIFEST:NO)
 target_link_libraries(PhoneMirror PRIVATE uxplay ${FFMPEG_LIBRARIES}
   d3d11 dxgi d2d1 dwrite dwmapi shell32 iphlpapi ws2_32 ole32 oleaut32 avrt windowsapp wlanapi windowscodecs
-  dbghelp winmm)
+  dbghelp winmm dcomp)
 
 # M7 spike: can Windows itself be a BLE HID peripheral? (console tool, not shipped)
 add_executable(bt_spike tools/bt_spike/main.cpp)

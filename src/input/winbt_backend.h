@@ -18,7 +18,7 @@ public:
     WinBtBackend(const WinBtBackend&) = delete;
     WinBtBackend& operator=(const WinBtBackend&) = delete;
 
-    void start(HWND notify_window);
+    void start(HWND notify_window) override;
 
     bool connected() const override;
     void mouse_move(int dx, int dy) override;
@@ -27,6 +27,7 @@ public:
     void mouse_steps(int dx, int dy, int step) override;
     void keyboard(const KeyboardState& state) override;
     void consumer_click(uint16_t usage) override;
+    void set_target(const std::string& phone_name) override;
 
 private:
     struct Impl;

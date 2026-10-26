@@ -1,0 +1,20 @@
+# Typing, Ctrl->Command mapping, Home / App Switcher / Spotlight shortcuts and the Ctrl+Alt escape hatch.
+expect Control: capture on
+expect Lab: PASS \[Lab iPhone 1\] text 'Hello lab 123'
+expect Lab: \[Lab iPhone 1\] shortcut Command\+c
+expect Lab: \[Lab iPhone 1\] Home
+expect Lab: \[Lab iPhone 1\] App Switcher
+expect Lab: \[Lab iPhone 1\] Spotlight
+expect Control: capture off
+expect-not Lab: FAIL
+0     video ../fixtures/portrait.h265
+1500  focus
+2000  click 0.5 0.5
+2600  type Hello lab 123
+4800  expect-text Hello lab 123
+5000  key ctrl+c
+5600  key ctrl+1
+6600  key ctrl+2
+7600  key ctrl+3
+8600  key ctrl+alt
+9500  quit

@@ -44,16 +44,17 @@ constexpr wchar_t kGlyphStats = 0xE9D9;
 constexpr wchar_t kGlyphSettings = 0xE713;
 constexpr wchar_t kGlyphClose = 0xE8BB;
 
+// The window draws its own rounded shape and shadow with per-pixel alpha, so DWM must not add a
+// rectangular shadow, border or corner rounding of its own.
 void apply_dwm_style(HWND hwnd) {
     BOOL dark = TRUE;
     DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
-    DWM_WINDOW_CORNER_PREFERENCE corners = DWMWCP_ROUND;
+    DWMNCRENDERINGPOLICY policy = DWMNCRP_DISABLED;
+    DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &policy, sizeof(policy));
+    DWM_WINDOW_CORNER_PREFERENCE corners = DWMWCP_DONOTROUND;
     DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corners, sizeof(corners));
     COLORREF border = DWMWA_COLOR_NONE;
     DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border, sizeof(border));
-    // A non-zero frame margin keeps the DWM drop shadow on a window without a non-client area.
-    MARGINS margins{0, 0, 1, 0};
-    DwmExtendFrameIntoClientArea(hwnd, &margins);
 }
 
 bool contains(const geometry::Rect& r, float x, float y) { return x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h; }
@@ -97,25 +98,28 @@ bool MirrorWindow::create(HINSTANCE instance, const std::wstring& receiver_name,
     MONITORINFO mi{sizeof(mi)};
     GetMonitorInfoW(MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY), &mi);
     const RECT& work = mi.rcWork;
-    int height = static_cast<int>((work.bottom - work.top) * 0.78f);
-    int width = static_cast<int>(std::lround(height * geometry::client_aspect(screen_aspect_)));
-    int x = work.left + ((work.right - work.left) - width) / 2 + slot * 40;
-    int y = work.top + ((work.bottom - work.top) - height) / 2 + slot * 40;
+    int height = static_cast<int>((work.bottom - work.top) * 0.80f);
+    int width = height / 2;  // final width once the renderer knows its margin
 
-    hwnd_ = CreateWindowExW(WS_EX_APPWINDOW, kClassName, receiver_name.c_str(),
-                            WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX, x, y, width, height, nullptr,
-                            nullptr, instance, this);
+    // No redirection bitmap: all pixels come from the (composition) swapchain, including transparent ones.
+    hwnd_ = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_NOREDIRECTIONBITMAP, kClassName, receiver_name.c_str(),
+                            WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX, work.left, work.top, width,
+                            height, nullptr, nullptr, instance, this);
     if (!hwnd_) {
         log::error("CreateWindowExW failed: {}", GetLastError());
         return false;
     }
-    restore_placement();
     dpi_ = GetDpiForWindow(hwnd_);
     apply_dwm_style(hwnd_);
 
     Settings& s = Settings::instance();
     renderer_.set_tearing_allowed(s.get_bool("tearing", true));
     if (!renderer_.init(hwnd_, dpi_)) return false;
+    width = static_cast<int>(std::lround(geometry::client_width_for_height(static_cast<float>(height), screen_aspect_, margin())));
+    int x = work.left + ((work.right - work.left) - width) / 2 + slot * 40;
+    int y = work.top + ((work.bottom - work.top) - height) / 2 + slot * 40;
+    SetWindowPos(hwnd_, nullptr, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+    restore_placement();
     renderer_.set_stats_visible(s.get_bool("stats", false));
     renderer_.set_idle_text(L"Waiting for iPhone…",
                             L"Open Control Center → Screen Mirroring → " + receiver_name_);
@@ -149,10 +153,12 @@ void MirrorWindow::apply_aspect(float aspect) {
     capture_.end();
     RECT r;
     GetWindowRect(hwnd_, &r);
-    int long_side = std::max(r.right - r.left, r.bottom - r.top);
-    float ca = geometry::client_aspect(aspect);
-    int w = ca < 1 ? static_cast<int>(std::lround(long_side * ca)) : long_side;
-    int h = ca < 1 ? long_side : static_cast<int>(std::lround(long_side / ca));
+    float m = margin();
+    float long_side = static_cast<float>(std::max(r.right - r.left, r.bottom - r.top)) - 2 * m;  // screen's long side
+    float sw = aspect < 1 ? long_side * aspect : long_side;
+    float sh = aspect < 1 ? long_side : long_side / aspect;
+    int w = static_cast<int>(std::lround(sw + 2 * m));
+    int h = static_cast<int>(std::lround(sh + 2 * m));
     int cx = (r.left + r.right) / 2;
     int cy = (r.top + r.bottom) / 2;
     SetWindowPos(hwnd_, nullptr, cx - w / 2, cy - h / 2, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -183,6 +189,7 @@ void MirrorWindow::show_hint(std::wstring text, UINT ms) {
 
 void MirrorWindow::on_click_to_control(POINT pt) {
     if (!parts_.control) return;
+    target_this_phone();
     if (capture_.begin()) {
         // Absolute sync (once calibrated): park the pointer in the top-left corner with one huge move, then
         // walk it to the clicked spot in small constant steps so iOS pointer acceleration stays out of it.
@@ -207,7 +214,7 @@ bool MirrorWindow::map_to_screen(POINT pt, float& nx, float& ny) {
     RECT rc;
     GetClientRect(hwnd_, &rc);
     geometry::Rect s = geometry::screen_rect(static_cast<float>(rc.right), static_cast<float>(rc.bottom),
-                                             renderer_.content_aspect());
+                                             renderer_.content_aspect(), margin());
     nx = (static_cast<float>(pt.x) - s.x) / s.w;
     ny = (static_cast<float>(pt.y) - s.y) / s.h;
     return nx >= 0 && nx <= 1 && ny >= 0 && ny <= 1;
@@ -220,6 +227,7 @@ void MirrorWindow::start_calibration() {
         return;
     }
     capture_.end();
+    target_this_phone();
     calibrating_ = true;
     parts_.control->mouse_steps(-32767, -32767, 32767);
     parts_.control->mouse_steps(kCalibrationCounts, kCalibrationCounts, kPointerStep);
@@ -249,6 +257,7 @@ void MirrorWindow::phone_action(uint16_t usage, int presses) {
         on_click_to_control({-1, -1});  // not connected: shows how to connect
         return;
     }
+    target_this_phone();
     for (int i = 0; i < presses; ++i) parts_.control->consumer_click(usage);
 }
 
@@ -275,7 +284,7 @@ BarLayout MirrorWindow::layout() const {
     GetClientRect(hwnd_, &rc);
     float scale = 96.0f / static_cast<float>(dpi_);
     return hover_bar_layout(rc.right * scale, rc.bottom * scale, const_cast<Renderer&>(renderer_).content_aspect(),
-                            bar_.buttons.size());
+                            renderer_.margin_px() * scale, bar_.buttons.size());
 }
 
 int MirrorWindow::button_at(POINT pt) const {
@@ -297,7 +306,7 @@ void MirrorWindow::update_bar(bool animate) {
     bool inside = PtInRect(&wr, cursor) && visible() && !capture_.active();
     POINT client = cursor;
     ScreenToClient(hwnd_, &client);
-    bool near_top = inside && client.y < dip(kTitleZoneDip) * 2;
+    bool near_top = inside && client.y < static_cast<int>(margin()) + dip(kTitleZoneDip) * 2;
     bar_target_ = near_top ? 1.0f : 0.0f;
 
     float before = bar_.opacity;
@@ -357,6 +366,9 @@ void MirrorWindow::run_action(BarAction action) {
     }
     case BarAction::Close: PostMessageW(hwnd_, WM_CLOSE, 0, 0); break;
     }
+    static constexpr const char* kNames[] = {"home", "app switcher", "screenshot", "record", "pin", "mute", "stats", "settings", "close"};
+    log::info("UI: {} (pin {}, mute {}, stats {})", kNames[static_cast<int>(action)], topmost_ ? "on" : "off",
+              parts_.audio && parts_.audio->muted() ? "on" : "off", renderer_.stats_visible() ? "on" : "off");
     build_buttons();
     renderer_.set_hover_bar(bar_);
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -404,14 +416,17 @@ void MirrorWindow::toggle_fullscreen() {
         MONITORINFO mi{sizeof(mi)};
         GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &mi);
         fullscreen_ = true;
+        renderer_.set_fullscreen(true);
         SetWindowPos(hwnd_, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left,
                      mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_FRAMECHANGED);
     } else {
         fullscreen_ = false;
+        renderer_.set_fullscreen(false);
         const RECT& r = windowed_rect_;
         SetWindowPos(hwnd_, topmost_ ? HWND_TOPMOST : HWND_NOTOPMOST, r.left, r.top, r.right - r.left, r.bottom - r.top,
                      SWP_FRAMECHANGED);
     }
+    log::info("UI: fullscreen {}", fullscreen_ ? "on" : "off");
 }
 
 bool MirrorWindow::on_shortcut(UINT vk, bool ctrl, bool shift) {
@@ -434,6 +449,7 @@ bool MirrorWindow::on_shortcut(UINT vk, bool ctrl, bool shift) {
         phone_action(kConsumerHome, 2);
     } else if (ctrl && !shift && vk == '3') {
         if (parts_.control && parts_.control->connected()) {
+            target_this_phone();
             parts_.control->keyboard({0x08, {0x2C}});  // Command+Space
             parts_.control->keyboard({});
         } else {
@@ -461,7 +477,7 @@ void MirrorWindow::restore_placement() {
     std::string saved = Settings::instance().get_string(std::format("window.{}", slot_), "");
     int x = 0, y = 0, h = 0;
     if (saved.empty() || sscanf_s(saved.c_str(), "%d,%d,%d", &x, &y, &h) != 3 || h < 200) return;
-    int w = static_cast<int>(std::lround(h * geometry::client_aspect(screen_aspect_)));
+    int w = static_cast<int>(std::lround(geometry::client_width_for_height(static_cast<float>(h), screen_aspect_, margin())));
     RECT r{x, y, x + w, y + h};
     MONITORINFO mi{sizeof(mi)};
     GetMonitorInfoW(MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST), &mi);
@@ -498,7 +514,7 @@ LRESULT MirrorWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_GETMINMAXINFO: {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
         int min_h = dip(kMinHeightDip);
-        mmi->ptMinTrackSize = {static_cast<LONG>(std::lround(min_h * geometry::client_aspect(screen_aspect_))), min_h};
+        mmi->ptMinTrackSize = {static_cast<LONG>(std::lround(geometry::client_width_for_height(static_cast<float>(min_h), screen_aspect_, margin()))), min_h};
         return 0;
     }
     case WM_SIZE:
@@ -606,7 +622,7 @@ LRESULT MirrorWindow::hit_test(POINT pt) const {
     if (fullscreen_) return HTCLIENT;
     RECT rc;
     GetWindowRect(hwnd_, &rc);
-    int b = dip(kResizeBorderDip);
+    int b = static_cast<int>(margin()) + dip(kResizeBorderDip);  // the transparent shadow margin plus a few px of the screen
     bool left = pt.x < rc.left + b;
     bool right = pt.x >= rc.right - b;
     bool top = pt.y < rc.top + b;
@@ -622,31 +638,43 @@ LRESULT MirrorWindow::hit_test(POINT pt) const {
     POINT client = pt;
     ScreenToClient(hwnd_, &client);
     if (button_at(client) >= 0) return HTCLIENT;
-    if (pt.y < rc.top + dip(kTitleZoneDip)) return HTCAPTION;
+    if (pt.y < rc.top + static_cast<int>(margin()) + dip(kTitleZoneDip)) return HTCAPTION;
     return HTCLIENT;
 }
 
 void MirrorWindow::on_sizing(WPARAM edge, RECT* r) const {
-    float aspect = geometry::client_aspect(screen_aspect_);
+    float a = screen_aspect_;
+    float m = margin();
+    auto height_for = [&](int w) { return static_cast<int>(std::lround(geometry::client_height_for_width(static_cast<float>(w), a, m))); };
+    auto width_for = [&](int h) { return static_cast<int>(std::lround(geometry::client_width_for_height(static_cast<float>(h), a, m))); };
     int w = r->right - r->left;
     int h = r->bottom - r->top;
     switch (edge) {
     case WMSZ_LEFT:
     case WMSZ_RIGHT:
-        r->bottom = r->top + static_cast<int>(std::lround(w / aspect));
+        r->bottom = r->top + height_for(w);
         break;
     case WMSZ_TOP:
     case WMSZ_BOTTOM:
-        r->right = r->left + static_cast<int>(std::lround(h * aspect));
+        r->right = r->left + width_for(h);
         break;
     case WMSZ_TOPLEFT:
     case WMSZ_TOPRIGHT:
-        r->top = r->bottom - static_cast<int>(std::lround(w / aspect));
+        r->top = r->bottom - height_for(w);
         break;
     default:
-        r->bottom = r->top + static_cast<int>(std::lround(w / aspect));
+        r->bottom = r->top + height_for(w);
         break;
     }
+}
+
+}  // namespace pm
+
+namespace pm {
+
+// With several phones paired to the PC's Bluetooth keyboard/mouse, input follows the window being used.
+void MirrorWindow::target_this_phone() {
+    if (parts_.control) parts_.control->set_target(parts_.video ? parts_.video->client_name() : std::string());
 }
 
 }  // namespace pm

@@ -7,6 +7,8 @@
 #include <cstring>
 #include <format>
 
+#include "app/settings.h"
+
 namespace pm {
 
 using Microsoft::WRL::ComPtr;
@@ -63,10 +65,16 @@ bool copy_image_to_clipboard(HWND owner, const std::vector<uint8_t>& bgra, UINT 
 }
 
 std::filesystem::path media_folder(const KNOWNFOLDERID& folder) {
-    PWSTR base = nullptr;
     std::filesystem::path dir;
-    if (SUCCEEDED(SHGetKnownFolderPath(folder, KF_FLAG_CREATE, nullptr, &base))) dir = std::filesystem::path(base) / L"PhoneMirror";
-    CoTaskMemFree(base);
+    if (Settings::data_dir_overridden()) {
+        dir = Settings::data_dir() / L"media";  // lab runs keep their captures out of Pictures/Videos
+    } else {
+        PWSTR base = nullptr;
+        if (SUCCEEDED(SHGetKnownFolderPath(folder, KF_FLAG_CREATE, nullptr, &base))) {
+            dir = std::filesystem::path(base) / L"PhoneMirror";
+        }
+        CoTaskMemFree(base);
+    }
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
     return dir;

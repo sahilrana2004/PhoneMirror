@@ -8,6 +8,8 @@
 #include "app/log.h"
 #include "app/settings.h"
 #include "input/control_backend.h"
+#include "lab/lab_phone.h"
+#include "lab/lab_runner.h"
 #include "mdns/responder.h"
 #include "net/firewall.h"
 #include "resource.h"
@@ -23,6 +25,7 @@ enum MenuId : UINT {
     kMenuSettings,
     kMenuFirewall,
     kMenuQuit,
+    kMenuPhonesBase = 50,   // + count: phones at once
     kMenuWindowBase = 100,  // + slot: toggle that window
 };
 
@@ -40,7 +43,7 @@ int App::run(HINSTANCE instance, const LaunchOptions& options) {
     log::info("PhoneMirror {} starting", PM_VERSION_STRING);
     Settings& settings = Settings::instance();
     receiver_name_ = widen(settings.get_string("receiver_name", "PhoneMirror"));
-    int receivers = std::clamp(static_cast<int>(settings.get_number("receivers", 1)), 1, 4);
+    int receivers = std::clamp(static_cast<int>(settings.get_number("receivers", 2)), 1, 4);
 
     WNDCLASSEXW wc{sizeof(wc)};
     wc.lpfnWndProc = &App::wndproc;
@@ -62,35 +65,52 @@ int App::run(HINSTANCE instance, const LaunchOptions& options) {
         log::error("Tray icon could not be added");
     }
 
-    bool playing = !options.play_video.empty() || !options.play_audio.empty();
-    if (playing) receivers = 1;
+    bool lab = !options.lab_scenario.empty();
+    bool playing = lab || !options.play_video.empty() || !options.play_audio.empty();
+    if (playing) receivers = lab ? LabRunner::phones_in(options.lab_scenario) : 1;
+    if (lab) {
+        auto phone = std::make_unique<LabPhone>();
+        lab_phone_ = phone.get();
+        control_ = std::move(phone);
+        InputCapture::accept_injected_input(true);
+    } else {
+        control_ = std::make_unique<WinBtBackend>();
+    }
     for (int slot = 0; slot < receivers; ++slot) {
-        std::wstring name = slot == 0 ? receiver_name_ : std::format(L"{} ({})", receiver_name_, slot + 1);
-        auto session = std::make_unique<Session>(slot, name, &control_);
-        if (!session->create(instance)) {
+        if (!add_session(slot)) {
             MessageBoxW(nullptr, L"PhoneMirror could not initialize Direct3D 11. See %APPDATA%\\PhoneMirror\\phonemirror.log.",
                         L"PhoneMirror", MB_ICONERROR);
             return 1;
         }
-        session->window().on_activated = [this](int active) { set_audio_focus(active); };
-        sessions_.push_back(std::move(session));
     }
     for (auto& s : sessions_) {
-        if (s->slot() == 0) s->window().show();  // extra slots appear when a phone connects to them
+        // Extra receiver slots stay hidden until a phone connects to them (the lab shows every phone).
+        if (s->slot() == 0 || lab) s->window().show();
         if (playing) {
-            s->start_files(options.play_video, options.play_audio);
+            if (!lab) s->start_files(options.play_video, options.play_audio);
         } else {
             s->start_receiver();
         }
     }
-    control_.start(hwnd_);
+    control_->start(hwnd_);
     if (!playing) check_network_setup(hwnd_);
+    if (lab) {
+        std::vector<Session*> lab_sessions;
+        for (auto& s : sessions_) {
+            s->window().renderer().set_painter(LabRunner::painter(*lab_phone_, LabRunner::phone_name(s->slot())));
+            lab_sessions.push_back(s.get());
+        }
+        lab_ = std::make_unique<LabRunner>(*lab_phone_, std::move(lab_sessions), hwnd_);
+        if (!lab_->load(options.lab_scenario)) return 2;
+        lab_->start();
+    }
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+    lab_.reset();
     sessions_.clear();
     MdnsResponder::instance().shutdown();
     log::info("PhoneMirror exiting");
@@ -127,6 +147,9 @@ LRESULT App::handle(UINT msg, WPARAM wp, LPARAM lp) {
     case kMsgShowWindow:
         show_all();
         return 0;
+    case kMsgLabQuit:
+        quit();
+        return 0;
     case kMsgControlState:  // the Bluetooth backend reports here; every window shows the change
         for (auto& s : sessions_) PostMessageW(s->window().hwnd(), kMsgControlState, wp, lp);
         return 0;
@@ -148,6 +171,12 @@ void App::show_tray_menu(POINT anchor) {
         AppendMenuW(menu, flags, kMenuWindowBase + s->slot(), s->name().c_str());
     }
     AppendMenuW(menu, MF_STRING, kMenuShowAll, L"Show all windows");
+    HMENU phones = CreatePopupMenu();
+    for (int n = 1; n <= 4; ++n) {
+        UINT checked = static_cast<int>(sessions_.size()) == n ? MF_CHECKED : MF_UNCHECKED;
+        AppendMenuW(phones, MF_STRING | checked, kMenuPhonesBase + n, n == 1 ? L"1 phone" : std::format(L"{} phones", n).c_str());
+    }
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(phones), L"Phones at once");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuSettings, L"Open settings file");
     AppendMenuW(menu, MF_STRING, kMenuFirewall, L"Check network && firewall setup");
@@ -168,6 +197,7 @@ void App::show_tray_menu(POINT anchor) {
     }
     if (cmd == kMenuFirewall) check_network_setup(hwnd_, true);
     if (cmd == kMenuQuit) quit();
+    if (cmd > kMenuPhonesBase && cmd <= kMenuPhonesBase + 4) set_phone_count(static_cast<int>(cmd - kMenuPhonesBase));
     if (cmd >= kMenuWindowBase) {
         for (auto& s : sessions_) {
             if (static_cast<int>(cmd - kMenuWindowBase) != s->slot()) continue;
@@ -178,6 +208,32 @@ void App::show_tray_menu(POINT anchor) {
             }
         }
     }
+}
+
+bool App::add_session(int slot) {
+    std::wstring name = slot == 0 ? receiver_name_ : std::format(L"{} ({})", receiver_name_, slot + 1);
+    auto session = std::make_unique<Session>(slot, name, control_.get());
+    if (!session->create(instance_)) return false;
+    session->window().on_activated = [this](int active) { set_audio_focus(active); };
+    sessions_.push_back(std::move(session));
+    return true;
+}
+
+// Tray "Phones at once": adds receivers (each advertises as "PhoneMirror (n)") or removes the last ones live.
+void App::set_phone_count(int count) {
+    count = std::clamp(count, 1, 4);
+    Settings::instance().set_number("receivers", count);
+    Settings::instance().save();
+    while (static_cast<int>(sessions_.size()) > count) {
+        log::info("Receiver \"{}\" removed", log::utf8(sessions_.back()->name()));
+        sessions_.pop_back();
+    }
+    while (static_cast<int>(sessions_.size()) < count) {
+        int slot = static_cast<int>(sessions_.size());
+        if (!add_session(slot)) break;
+        sessions_.back()->start_receiver();
+    }
+    log::info("Phones at once: {}", sessions_.size());
 }
 
 void App::show_all() {

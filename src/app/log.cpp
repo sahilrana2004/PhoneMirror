@@ -15,11 +15,7 @@ std::FILE* g_file = nullptr;
 
 }  // namespace
 
-void init() {
-    PWSTR appdata = nullptr;
-    if (FAILED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &appdata))) return;
-    std::filesystem::path dir = std::filesystem::path(appdata) / L"PhoneMirror";
-    CoTaskMemFree(appdata);
+void init(const std::filesystem::path& dir) {
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
     // Shared so a viewer (or a dying previous instance still holding a handle) never blocks logging;

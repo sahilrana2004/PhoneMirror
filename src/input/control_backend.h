@@ -1,6 +1,9 @@
 #pragma once
 
+#include <windows.h>
+
 #include <cstdint>
+#include <string>
 
 namespace pm {
 
@@ -29,6 +32,7 @@ inline constexpr unsigned kMsgControlState = 0x8000 + 20;  // WM_APP + 20
 class IControlBackend {
 public:
     virtual ~IControlBackend() = default;
+    virtual void start(HWND notify_window) = 0;  // posts kMsgControlState to notify_window on (dis)connect
     virtual bool connected() const = 0;
     virtual void mouse_move(int dx, int dy) = 0;
     virtual void mouse_scroll(int wheel, int pan) = 0;
@@ -38,6 +42,9 @@ public:
     virtual void mouse_steps(int dx, int dy, int step) = 0;
     virtual void keyboard(const KeyboardState& state) = 0;
     virtual void consumer_click(uint16_t usage) = 0;
+    // With several phones connected, input goes only to the one with this name (its AirPlay name, matched
+    // against its Bluetooth name). Empty or no match: every connected phone.
+    virtual void set_target(const std::string& phone_name) = 0;
 };
 
 }  // namespace pm

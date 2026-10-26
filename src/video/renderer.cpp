@@ -22,10 +22,13 @@ struct alignas(16) PresentParams {
     float bg_bottom[4];
     float yuv[3][4];
     float uv_scale[2];
-    float pad1[2];
+    float shadow_radius;
+    float shadow_alpha;
 };
 
-constexpr float kBezelColor[4] = {0.043f, 0.043f, 0.051f, 1};
+constexpr float kOpaqueBlack[4] = {0, 0, 0, 1};  // fullscreen letterbox / screenshots
+constexpr float kTransparent[4] = {0, 0, 0, 0};  // windowed: nothing outside the phone screen
+constexpr float kShadowAlpha = 0.45f;
 constexpr float kIdleTop[4] = {0.075f, 0.082f, 0.110f, 1};
 constexpr float kIdleBottom[4] = {0.024f, 0.027f, 0.039f, 1};
 
@@ -210,26 +213,68 @@ bool Renderer::create_swapchain() {
     desc.SampleDesc.Count = 1;
     desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     desc.BufferCount = 2;
-    desc.Scaling = DXGI_SCALING_NONE;
     desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
     swapchain_flags_ = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
-    if (tearing_) swapchain_flags_ |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
-    desc.Flags = swapchain_flags_;
+    margin_px_ = composition_ ? geometry::kShadowMarginDip * static_cast<float>(dpi_) / 96.0f : 0.0f;
 
     ComPtr<IDXGISwapChain1> sc1;
-    HRESULT hr = factory_->CreateSwapChainForHwnd(device_.Get(), hwnd_, &desc, nullptr, nullptr, &sc1);
+    HRESULT hr;
+    if (composition_) {
+        // Composition swapchains are always DWM-composed (no tearing); a windowed HWND swapchain is too,
+        // so windowed latency is unchanged while the corners and shadow become truly transparent.
+        desc.Scaling = DXGI_SCALING_STRETCH;
+        desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+        desc.Flags = swapchain_flags_;
+        hr = factory_->CreateSwapChainForComposition(device_.Get(), &desc, nullptr, &sc1);
+        if (SUCCEEDED(hr) && !dcomp_) {
+            ComPtr<IDXGIDevice> dxgi_device;
+            device_.As(&dxgi_device);
+            hr = DCompositionCreateDevice(dxgi_device.Get(), IID_PPV_ARGS(&dcomp_));
+            if (SUCCEEDED(hr)) hr = dcomp_->CreateTargetForHwnd(hwnd_, TRUE, &dcomp_target_);
+            if (SUCCEEDED(hr)) hr = dcomp_->CreateVisual(&dcomp_visual_);
+            if (SUCCEEDED(hr)) hr = dcomp_target_->SetRoot(dcomp_visual_.Get());
+        }
+        if (SUCCEEDED(hr)) hr = dcomp_visual_->SetContent(sc1.Get());
+        if (SUCCEEDED(hr)) hr = dcomp_->Commit();
+    } else {
+        desc.Scaling = DXGI_SCALING_NONE;
+        desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+        if (tearing_) swapchain_flags_ |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+        desc.Flags = swapchain_flags_;
+        hr = factory_->CreateSwapChainForHwnd(device_.Get(), hwnd_, &desc, nullptr, nullptr, &sc1);
+        if (SUCCEEDED(hr)) factory_->MakeWindowAssociation(hwnd_, DXGI_MWA_NO_ALT_ENTER);
+    }
     if (FAILED(hr)) {
-        log::error("CreateSwapChainForHwnd failed: 0x{:08X}", hex(hr));
+        log::error("Swapchain creation ({}) failed: 0x{:08X}", composition_ ? "composition" : "hwnd", hex(hr));
         return false;
     }
-    factory_->MakeWindowAssociation(hwnd_, DXGI_MWA_NO_ALT_ENTER);
     sc1.As(&swapchain_);
     swapchain_->SetMaximumFrameLatency(1);
     if (frame_wait_) CloseHandle(frame_wait_);
     frame_wait_ = swapchain_->GetFrameLatencyWaitableObject();
-    log::info("Swapchain {}x{} flip-discard, tearing {}", width_, height_, tearing_ ? "on" : "off");
+    log::info("Swapchain {}x{} flip-discard, {}", width_, height_,
+              composition_ ? "composition (transparent edges)" : tearing_ ? "direct, tearing on" : "direct");
     return true;
+}
+
+void Renderer::set_fullscreen(bool fullscreen) {
+    std::lock_guard lock(lock_);
+    if (composition_ == !fullscreen || !device_) return;
+    release_targets();
+    swapchain_.Reset();
+    if (dcomp_visual_) {
+        dcomp_visual_->SetContent(nullptr);
+        dcomp_->Commit();
+    }
+    if (fullscreen) {  // an HWND swapchain cannot coexist with a composition target on the same window
+        dcomp_visual_.Reset();
+        dcomp_target_.Reset();
+        dcomp_.Reset();
+    }
+    ctx_->ClearState();
+    ctx_->Flush();
+    composition_ = !fullscreen;
+    if (!create_swapchain() || !create_targets()) handle_device_lost();
 }
 
 bool Renderer::create_targets() {
@@ -282,6 +327,7 @@ void Renderer::resize() {
 void Renderer::set_dpi(UINT dpi) {
     std::lock_guard lock(lock_);
     dpi_ = dpi;
+    margin_px_ = composition_ ? geometry::kShadowMarginDip * static_cast<float>(dpi_) / 96.0f : 0.0f;
     if (d2d_target_) {
         release_targets();
         create_targets();
@@ -368,18 +414,29 @@ void Renderer::draw_and_present() {
     if (!swapchain_ || !rtv_) return;
 
     float aspect = has_frame_ ? static_cast<float>(frame_.width) / static_cast<float>(frame_.height) : screen_aspect_;
-    geometry::Rect screen = geometry::screen_rect(static_cast<float>(width_), static_cast<float>(height_), aspect);
+    geometry::Rect screen = geometry::screen_rect(static_cast<float>(width_), static_cast<float>(height_), aspect, margin_px_);
     const float rect[4] = {screen.x, screen.y, screen.x + screen.w, screen.y + screen.h};
     const SliceViews* views = has_frame_ ? views_for(frame_) : nullptr;
     draw_quad(rtv_.Get(), static_cast<float>(width_), static_cast<float>(height_), rect,
-              geometry::kCorner * std::min(screen.w, screen.h), views);
+              geometry::kCorner * std::min(screen.w, screen.h), views, composition_);
 
     if (!views) draw_idle_text();
+    if (painter_) {
+        float scale = 96.0f / static_cast<float>(dpi_);
+        d2d_ctx_->BeginDraw();
+        painter_(d2d_ctx_.Get(), D2D1::RectF(screen.x * scale, screen.y * scale, (screen.x + screen.w) * scale,
+                                             (screen.y + screen.h) * scale));
+        d2d_ctx_->EndDraw();
+    }
     draw_hover_bar();
     draw_overlay();
     draw_stats();
 
-    HRESULT hr = swapchain_->Present(0, tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0);
+    // Tearing only exists for the direct (fullscreen) swapchain; a composition swapchain rejects the flag.
+    HRESULT hr = swapchain_->Present(0, tearing_ && !composition_ ? DXGI_PRESENT_ALLOW_TEARING : 0);
+    if (FAILED(hr) && hr != DXGI_ERROR_DEVICE_REMOVED && hr != DXGI_ERROR_DEVICE_RESET) {
+        log::error("Present failed: 0x{:08X}", hex(hr));
+    }
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
         log::error("Device lost: 0x{:08X}", hex(device_->GetDeviceRemovedReason()));
         handle_device_lost();
@@ -407,7 +464,7 @@ bool Renderer::capture_frame(std::vector<uint8_t>& bgra, UINT& width, UINT& heig
         return false;
     }
     const float rect[4] = {0, 0, static_cast<float>(width), static_cast<float>(height)};
-    draw_quad(rtv.Get(), static_cast<float>(width), static_cast<float>(height), rect, 0.0f, views);
+    draw_quad(rtv.Get(), static_cast<float>(width), static_cast<float>(height), rect, 0.0f, views, false);
 
     td.BindFlags = 0;
     td.Usage = D3D11_USAGE_STAGING;
@@ -427,15 +484,18 @@ bool Renderer::capture_frame(std::vector<uint8_t>& bgra, UINT& width, UINT& heig
     return true;
 }
 
-// Full-target pass: rounded phone screen (video or idle gradient) inside the bezel colour.
+// Full-target pass: rounded phone screen (video or idle gradient). Outside it: transparent with a soft
+// shadow (windowed) or opaque black (fullscreen, screenshots).
 void Renderer::draw_quad(ID3D11RenderTargetView* target, float vw, float vh, const float rect[4], float radius,
-                         const SliceViews* views) {
+                         const SliceViews* views, bool transparent_outside) {
     PresentParams p{};
     p.viewport[0] = vw;
     p.viewport[1] = vh;
     p.corner_radius = radius;
     std::copy_n(rect, 4, p.screen_rect);
-    std::copy_n(kBezelColor, 4, p.bezel_color);
+    std::copy_n(transparent_outside ? kTransparent : kOpaqueBlack, 4, p.bezel_color);
+    p.shadow_radius = transparent_outside ? margin_px_ : 0.0f;
+    p.shadow_alpha = kShadowAlpha;
     std::copy_n(kIdleTop, 4, p.bg_top);
     std::copy_n(kIdleBottom, 4, p.bg_bottom);
 
@@ -463,6 +523,11 @@ void Renderer::draw_quad(ID3D11RenderTargetView* target, float vw, float vh, con
     ctx_->Draw(3, 0);
 }
 
+void Renderer::set_painter(Painter painter) {
+    std::lock_guard lock(lock_);
+    painter_ = std::move(painter);
+}
+
 void Renderer::set_hover_bar(HoverBarState state) {
     std::lock_guard lock(lock_);
     bar_ = std::move(state);
@@ -472,7 +537,7 @@ void Renderer::draw_hover_bar() {
     if (bar_.opacity <= 0.01f && !bar_.recording) return;
     float scale = 96.0f / static_cast<float>(dpi_);
     float aspect = has_frame_ ? static_cast<float>(frame_.width) / static_cast<float>(frame_.height) : screen_aspect_;
-    BarLayout l = hover_bar_layout(width_ * scale, height_ * scale, aspect, bar_.buttons.size());
+    BarLayout l = hover_bar_layout(width_ * scale, height_ * scale, aspect, margin_px_ * scale, bar_.buttons.size());
     float a = bar_.opacity;
 
     d2d_ctx_->BeginDraw();
@@ -527,7 +592,7 @@ void Renderer::draw_idle_text() {
     if (title_.empty()) return;
     float scale = 96.0f / static_cast<float>(dpi_);
     geometry::Rect s =
-        geometry::screen_rect(static_cast<float>(width_), static_cast<float>(height_), screen_aspect_);
+        geometry::screen_rect(static_cast<float>(width_), static_cast<float>(height_), screen_aspect_, margin_px_);
     float left = (s.x + s.w * 0.1f) * scale;
     float right = (s.x + s.w * 0.9f) * scale;
     float mid = (s.y + s.h * 0.45f) * scale;
@@ -549,7 +614,7 @@ void Renderer::draw_overlay() {
     if (overlay_.empty()) return;
     float scale = 96.0f / static_cast<float>(dpi_);
     float aspect = has_frame_ ? static_cast<float>(frame_.width) / static_cast<float>(frame_.height) : screen_aspect_;
-    geometry::Rect s = geometry::screen_rect(static_cast<float>(width_), static_cast<float>(height_), aspect);
+    geometry::Rect s = geometry::screen_rect(static_cast<float>(width_), static_cast<float>(height_), aspect, margin_px_);
     ComPtr<IDWriteTextLayout> layout;
     dwrite_->CreateTextLayout(overlay_.c_str(), static_cast<UINT32>(overlay_.size()), detail_format_.Get(),
                               s.w * 0.9f * scale, 200.0f, &layout);
@@ -580,7 +645,7 @@ void Renderer::draw_stats() {
     if (!stats_visible_ || stats_.empty()) return;
     float scale = 96.0f / static_cast<float>(dpi_);
     float aspect = has_frame_ ? static_cast<float>(frame_.width) / static_cast<float>(frame_.height) : screen_aspect_;
-    geometry::Rect s = geometry::screen_rect(static_cast<float>(width_), static_cast<float>(height_), aspect);
+    geometry::Rect s = geometry::screen_rect(static_cast<float>(width_), static_cast<float>(height_), aspect, margin_px_);
     ComPtr<IDWriteTextLayout> layout;
     dwrite_->CreateTextLayout(stats_.c_str(), static_cast<UINT32>(stats_.size()), stats_format_.Get(),
                               s.w * 0.92f * scale, 200.0f, &layout);
@@ -607,6 +672,9 @@ void Renderer::handle_device_lost() {
         frame_wait_ = nullptr;
     }
     swapchain_.Reset();
+    dcomp_visual_.Reset();
+    dcomp_target_.Reset();
+    dcomp_.Reset();
     title_brush_.Reset();
     detail_brush_.Reset();
     overlay_brush_.Reset();

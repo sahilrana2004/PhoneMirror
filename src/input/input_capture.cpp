@@ -11,6 +11,7 @@ namespace pm {
 namespace {
 
 InputCapture* g_capture = nullptr;  // the hook is process-wide; only one window captures at a time
+bool g_accept_injected = false;
 
 constexpr uint8_t kCtrlBits = 0x11;
 constexpr uint8_t kAltBits = 0x44;
@@ -180,7 +181,7 @@ LRESULT CALLBACK InputCapture::keyboard_hook(int code, WPARAM wp, LPARAM lp) {
     if (code == HC_ACTION && g_capture && g_capture->active_) {
         const auto& k = *reinterpret_cast<const KBDLLHOOKSTRUCT*>(lp);
         bool down = wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN;
-        if (!(k.flags & LLKHF_INJECTED) && g_capture->on_key(k, down)) return 1;
+        if ((g_accept_injected || !(k.flags & LLKHF_INJECTED)) && g_capture->on_key(k, down)) return 1;
     }
     return CallNextHookEx(nullptr, code, wp, lp);
 }
@@ -250,4 +251,8 @@ bool InputCapture::on_key(const KBDLLHOOKSTRUCT& k, bool down) {
 
 void InputCapture::send_keyboard() { backend_->keyboard(keyboard_); }
 
+}  // namespace pm
+
+namespace pm {
+void InputCapture::accept_injected_input(bool accept) { g_accept_injected = accept; }
 }  // namespace pm

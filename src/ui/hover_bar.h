@@ -36,8 +36,8 @@ inline constexpr float kBarHeightDip = 40.0f;
 
 // Layout in DIPs for a client of the given DIP size showing content of the given aspect. The bar spans the
 // top of the phone screen, inset from the rounded corners; buttons shrink before they would overflow.
-inline BarLayout hover_bar_layout(float client_w, float client_h, float aspect, size_t button_count) {
-    geometry::Rect s = geometry::screen_rect(client_w, client_h, aspect);
+inline BarLayout hover_bar_layout(float client_w, float client_h, float aspect, float margin, size_t button_count) {
+    geometry::Rect s = geometry::screen_rect(client_w, client_h, aspect, margin);
     BarLayout l;
     l.bar = {s.x, s.y, s.w, kBarHeightDip};
     float inset = std::min(geometry::kCorner * std::min(s.w, s.h) * 0.55f, s.w * 0.12f);

@@ -1,0 +1,17 @@
+# Pointer calibration, then absolute positioning on click, taps, scrolling and relative motion.
+expect Pointer calibrated
+expect Lab: PASS \[Lab iPhone 1\] pointer near \(0\.25, 0\.70\)
+expect Lab: \[Lab iPhone 1\] tap at
+expect Lab: \[Lab iPhone 1\] scroll 3
+expect-not Lab: FAIL
+0     video ../fixtures/portrait.h265
+1500  focus
+2000  key ctrl+shift+p
+4000  click-pointer
+5000  click 0.25 0.70
+7000  expect-pointer 0.25 0.70 0.03
+7500  click 0.5 0.5
+8000  wheel 3
+8500  move 120 0
+9000  key ctrl+alt
+9500  quit

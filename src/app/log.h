@@ -1,12 +1,13 @@
 #pragma once
 
+#include <filesystem>
 #include <format>
 #include <string>
 #include <string_view>
 
 namespace pm::log {
 
-void init();
+void init(const std::filesystem::path& dir);  // writes <dir>/phonemirror.log
 void write(std::string_view level, std::string_view message);
 
 std::string utf8(std::wstring_view text);

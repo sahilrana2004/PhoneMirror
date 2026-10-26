@@ -4,6 +4,7 @@
 
 #include <fstream>
 #include <iterator>
+#include <random>
 #include <vector>
 
 extern "C" {
@@ -27,27 +28,53 @@ bool FileSource::start(const std::filesystem::path& path, ReceiverSink& sink) {
     bool h265 = ext == L".h265" || ext == L".hevc" || ext == L".265";
     log::info("--play: {} ({} bytes, {})", log::utf8(path.wstring()), data.size(), h265 ? "H.265" : "H.264");
 
+    stop_video();  // switching clips mid-stream is how the lab simulates rotation
     running_ = true;
-    thread_ = std::thread([this, data = std::move(data), h265, &sink] {
+    video_running_ = true;
+    bool first = !mirror_started_;
+    mirror_started_ = true;
+    thread_ = std::thread([this, data = std::move(data), h265, first, &sink] {
         AVCodecParserContext* parser = av_parser_init(h265 ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264);
         AVCodecContext* ctx = avcodec_alloc_context3(nullptr);
-        sink.on_mirror_start();
+        if (first) sink.on_mirror_start();
         if (!sink.on_codec(h265)) log::error("--play: codec rejected");
+        std::minstd_rand rng(12345);
+        int reported_w = 0, reported_h = 0;
+        std::vector<std::vector<uint8_t>> held;  // frames stuck behind a simulated stall
         LARGE_INTEGER freq, start, now;
         QueryPerformanceFrequency(&freq);
-        while (running_) {
+        uint64_t total = 0;
+        while (video_running_) {
             QueryPerformanceCounter(&start);
             uint64_t frames = 0;
             const uint8_t* p = data.data();
             int left = static_cast<int>(data.size());
-            while (running_ && left > 0) {
+            while (video_running_ && left > 0) {
                 uint8_t* out = nullptr;
                 int out_size = 0;
                 int used = av_parser_parse2(parser, ctx, &out, &out_size, p, left, AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
                 p += used;
                 left -= used;
                 if (!out_size) continue;
-                sink.on_video(out, static_cast<size_t>(out_size), h265);
+                if (parser->width > 0 && (parser->width != reported_w || parser->height != reported_h)) {
+                    reported_w = parser->width;
+                    reported_h = parser->height;
+                    sink.on_video_size(reported_w, reported_h);  // as AirPlay reports a rotation
+                }
+                Impairment imp;
+                {
+                    std::lock_guard lock(impairment_mutex_);
+                    imp = impairment_;
+                }
+                ++total;
+                if (imp.burst_every > 0 && imp.burst_size > 0 && (total % imp.burst_every) < static_cast<uint64_t>(imp.burst_size)) {
+                    held.emplace_back(out, out + out_size);
+                } else {
+                    if (imp.jitter_ms > 0) Sleep(static_cast<DWORD>(rng() % (imp.jitter_ms + 1)));
+                    for (auto& f : held) sink.on_video(f.data(), f.size(), h265);
+                    held.clear();
+                    sink.on_video(out, static_cast<size_t>(out_size), h265);
+                }
                 ++frames;
                 // Pace at 60 fps against the clock, not by sleeping a fixed amount per frame.
                 for (;;) {
@@ -65,6 +92,18 @@ bool FileSource::start(const std::filesystem::path& path, ReceiverSink& sink) {
         avcodec_free_context(&ctx);
     });
     return true;
+}
+
+void FileSource::stop_video() {
+    video_running_ = false;
+    if (thread_.joinable()) thread_.join();
+}
+
+void FileSource::set_impairment(const Impairment& impairment) {
+    std::lock_guard lock(impairment_mutex_);
+    impairment_ = impairment;
+    log::info("Lab: impairment jitter {} ms, burst {} of every {} frames", impairment.jitter_ms, impairment.burst_size,
+              impairment.burst_every);
 }
 
 bool FileSource::start_audio(const std::filesystem::path& path, AudioSink& sink) {
@@ -108,7 +147,7 @@ bool FileSource::start_audio(const std::filesystem::path& path, AudioSink& sink)
 
 void FileSource::stop() {
     running_ = false;
-    if (thread_.joinable()) thread_.join();
+    stop_video();
     if (audio_thread_.joinable()) audio_thread_.join();
 }
 

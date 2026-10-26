@@ -38,7 +38,7 @@ Installer (Inno Setup 6): `ISCC.exe installer\phonemirror.iss` → `build\instal
 | Key | Default | |
 |---|---|---|
 | `receiver_name` | `"PhoneMirror"` | Name shown in Screen Mirroring |
-| `receivers` | `1` | Phones at once (1–4); extra ones appear as "PhoneMirror (2)" … |
+| `receivers` | `2` | Phones at once (1–4, also tray › Phones at once); extra ones appear as "PhoneMirror (2)" … |
 | `codec` | `"auto"` | `"h264"` forces H.264 (1080 lines max) |
 | `max_fps`, `refresh_rate` | `60`, `60` | Advertised to the iPhone |
 | `tearing` | `true` | Lowest latency; `false` for tear-free |
@@ -49,6 +49,20 @@ Installer (Inno Setup 6): `ISCC.exe installer\phonemirror.iss` → `build\instal
 | `audio_follows_focus` | `true` | With several phones, only the front window plays |
 | `audio_delay_ms` | `0` | "Sync audio to video": hold audio back (0–500 ms) to match the picture |
 | `pointer_cal_x`, `pointer_cal_y` | — | Written by pointer calibration (Ctrl+Shift+P) |
+
+## Lab (testing without a phone)
+
+```powershell
+.\lab\run-lab.ps1              # every scenario in lab\scenarios, PASS/FAIL report
+.\lab\run-lab.ps1 -Only pointer
+```
+
+The lab runs PhoneMirror against **virtual iPhones**: generated portrait/landscape H.265/H.264 streams and audio
+(fixtures are created once with ffmpeg), Wi-Fi-like jitter and stall bursts, and a fake Bluetooth keyboard/mouse
+receiver that draws its pointer, taps and typed text over the mirror. Scenarios (`lab\scenarios\*.lab`) are
+timelines of real mouse/keyboard input plus log/file assertions; each run uses its own settings, log and media
+folder under `lab\out`, so it never touches your real setup and can run while PhoneMirror is open. Don't use the
+mouse or keyboard while it runs; input steps are skipped if the lab window is not in front.
 
 ## Developer flags
 

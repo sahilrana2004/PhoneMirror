@@ -145,13 +145,23 @@ Settings& Settings::instance() {
     return settings;
 }
 
+namespace {
+std::filesystem::path g_data_dir_override;
+}  // namespace
+
+void Settings::set_data_dir(const std::filesystem::path& dir) { g_data_dir_override = std::filesystem::absolute(dir); }
+
+bool Settings::data_dir_overridden() { return !g_data_dir_override.empty(); }
+
 std::filesystem::path Settings::data_dir() {
-    PWSTR appdata = nullptr;
-    std::filesystem::path dir;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &appdata))) {
-        dir = std::filesystem::path(appdata) / L"PhoneMirror";
+    std::filesystem::path dir = g_data_dir_override;
+    if (dir.empty()) {
+        PWSTR appdata = nullptr;
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &appdata))) {
+            dir = std::filesystem::path(appdata) / L"PhoneMirror";
+        }
+        CoTaskMemFree(appdata);
     }
-    CoTaskMemFree(appdata);
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
     return dir;

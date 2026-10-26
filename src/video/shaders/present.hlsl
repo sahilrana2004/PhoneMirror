@@ -10,7 +10,8 @@ cbuffer Params : register(b0) {
     float4 yuv_g;
     float4 yuv_b;
     float2 uv_scale;  // decoded size / texture size (decoder surfaces are padded)
-    float2 pad1;
+    float shadow_radius;  // px of soft shadow outside the screen (0 = none)
+    float shadow_alpha;   // peak shadow opacity
 };
 
 Texture2D<float> tex_y : register(t0);
@@ -50,5 +51,15 @@ float4 ps_main(VSOut i) : SV_Target {
     } else {
         screen = lerp(bg_top.rgb, bg_bottom.rgb, suv.y);
     }
-    return float4(lerp(bezel_color.rgb, screen, coverage), 1);
+    // Outside the screen: bezel colour (opaque in fullscreen, fully transparent when windowed) plus a soft
+    // drop shadow, nudged down a little like a macOS window's. Output is premultiplied alpha.
+    float4 outside = float4(bezel_color.rgb * bezel_color.a, bezel_color.a);
+    if (shadow_radius > 0) {
+        float2 shadow_offset = float2(0, shadow_radius * 0.25);
+        float ds = rounded_box(px - (screen_rect.xy + size * 0.5) - shadow_offset, size * 0.5, corner_radius);
+        float t = saturate(ds / shadow_radius);
+        float a = shadow_alpha * (1 - t) * (1 - t);
+        outside = float4(outside.rgb * (1 - a), outside.a + a * (1 - outside.a));
+    }
+    return float4(screen * coverage + outside.rgb * (1 - coverage), coverage + outside.a * (1 - coverage));
 }

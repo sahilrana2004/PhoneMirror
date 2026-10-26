@@ -1,0 +1,8 @@
+# Both codecs decode and present at ~60 fps; switching codec mid-stream reopens the decoder.
+expect Decoder open: H\.265
+expect Decoder open: H\.264
+expect Video: (5[5-9]|6\d)\.\d fps
+expect-not Lab: FAIL
+0     video ../fixtures/portrait.h265
+4000  video ../fixtures/portrait.h264
+8000  quit

@@ -23,6 +23,10 @@ public:
         hwnd_ = hwnd;
         backend_ = backend;
     }
+    // Lab only: synthetic (SendInput) keystrokes are normally ignored so remote-control tools cannot type
+    // into the phone; the lab drives the app with exactly such input.
+    static void accept_injected_input(bool accept);
+
     void configure(bool swap_ctrl_cmd, double pointer_gain) {
         swap_ctrl_cmd_ = swap_ctrl_cmd;
         pointer_gain_ = pointer_gain;

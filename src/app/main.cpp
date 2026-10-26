@@ -59,20 +59,26 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         }
         if (arg == L"--play" && i + 1 < argc) options.play_video = argv[++i];
         if (arg == L"--play-audio" && i + 1 < argc) options.play_audio = argv[++i];
+        if (arg == L"--lab" && i + 1 < argc) options.lab_scenario = std::filesystem::absolute(argv[++i]);
+        if (arg == L"--data-dir" && i + 1 < argc) pm::Settings::set_data_dir(argv[++i]);
     }
     LocalFree(argv);
 
     // One app per machine (it hosts every receiver slot): a second launch just surfaces the windows.
-    HANDLE instance_mutex = CreateMutexW(nullptr, TRUE, L"Local\\PhoneMirror.Instance");
+    // Lab runs have no network side, so they get their own lock and can run next to the real app.
+    bool lab = !options.lab_scenario.empty();
+    HANDLE instance_mutex = CreateMutexW(nullptr, TRUE, lab ? L"Local\\PhoneMirror.Lab" : L"Local\\PhoneMirror.Instance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        if (HWND existing = FindWindowW(pm::kAppWindowClass, nullptr)) PostMessageW(existing, pm::kMsgShowWindow, 0, 0);
+        if (!lab) {
+            if (HWND existing = FindWindowW(pm::kAppWindowClass, nullptr)) PostMessageW(existing, pm::kMsgShowWindow, 0, 0);
+        }
         return 0;
     }
 
     SetUnhandledExceptionFilter(&write_crash_dump);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);  // WIC (screenshots), firewall/network COM APIs
     timeBeginPeriod(1);
-    pm::log::init();
+    pm::log::init(pm::Settings::data_dir());
     pm::Settings::instance().load();
 
     int code;

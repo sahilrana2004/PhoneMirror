@@ -93,11 +93,22 @@ struct WinBtBackend::Impl {
     // Minimum spacing of mouse reports: one per connection event, so motion is coalesced rather than queued.
     std::atomic<int> min_interval_us = 7500;
 
-    void run();
-    void tune_connection(GattSession const& session);
+    // Every phone subscribed to the HID reports, and which one input currently goes to.
+    struct Client {
+        GattSubscribedClient client{nullptr};
+        std::string id;
+        std::string name;
+        BluetoothLEDevice device{nullptr};
+        BluetoothLEPreferredConnectionParametersRequest params{nullptr};  // kept alive: dropping it cancels the request
+    };
+    std::mutex clients_mutex;
+    std::vector<Client> clients;
+    std::string target;
 
-    BluetoothLEDevice device{nullptr};
-    BluetoothLEPreferredConnectionParametersRequest params_request{nullptr};
+    void run();
+    void update_clients(GattLocalCharacteristic const& reports);
+    void tune_connection(Client& client);
+    GattSubscribedClient target_client();
 };
 
 WinBtBackend::WinBtBackend() : impl_(std::make_unique<Impl>()) {}
@@ -167,26 +178,85 @@ void WinBtBackend::consumer_click(uint16_t usage) {
     impl_->wake.notify_one();
 }
 
-void WinBtBackend::Impl::tune_connection(GattSession const& session) {
+void WinBtBackend::set_target(const std::string& phone_name) {
+    std::lock_guard lock(impl_->clients_mutex);
+    impl_->target = phone_name;
+}
+
+void WinBtBackend::Impl::tune_connection(Client& c) {
     try {
-        device = BluetoothLEDevice::FromIdAsync(session.DeviceId().Id()).get();
-        if (!device) return;
-        BluetoothLEConnectionParameters p = device.GetConnectionParameters();
-        log::info("Control: link interval {:.2f} ms, latency {}, timeout {} ms", p.ConnectionInterval() * 1.25,
+        BluetoothLEConnectionParameters p = c.device.GetConnectionParameters();
+        log::info("Control: '{}' link interval {:.2f} ms, latency {}, timeout {} ms", c.name, p.ConnectionInterval() * 1.25,
                   p.ConnectionLatency(), p.LinkTimeout() * 10);
         min_interval_us = std::max(7500, static_cast<int>(p.ConnectionInterval() * 1250));
-        device.ConnectionParametersChanged([this](BluetoothLEDevice const& d, auto&&) {
+        c.device.ConnectionParametersChanged([this](BluetoothLEDevice const& d, auto&&) {
             BluetoothLEConnectionParameters np = d.GetConnectionParameters();
             min_interval_us = std::max(7500, static_cast<int>(np.ConnectionInterval() * 1250));
             log::info("Control: link interval now {:.2f} ms", np.ConnectionInterval() * 1.25);
         });
-        params_request =
-            device.RequestPreferredConnectionParameters(BluetoothLEPreferredConnectionParameters::ThroughputOptimized());
-        log::info("Control: requested low-latency link parameters (status {})",
-                  static_cast<int>(params_request.Status()));
+        c.params = c.device.RequestPreferredConnectionParameters(BluetoothLEPreferredConnectionParameters::ThroughputOptimized());
+        log::info("Control: requested low-latency link parameters (status {})", static_cast<int>(c.params.Status()));
     } catch (hresult_error const& e) {
         log::info("Control: link tuning unavailable (0x{:08X})", static_cast<unsigned>(e.code()));
     }
+}
+
+// Keeps `clients` in step with the phones subscribed to the reports; new phones get their name resolved
+// (for routing) and their link tuned.
+void WinBtBackend::Impl::update_clients(GattLocalCharacteristic const& reports) {
+    std::vector<Client> next;
+    for (GattSubscribedClient const& sub : reports.SubscribedClients()) {
+        std::string id = to_string(sub.Session().DeviceId().Id());
+        Client c;
+        {
+            std::lock_guard lock(clients_mutex);
+            auto it = std::find_if(clients.begin(), clients.end(), [&](const Client& k) { return k.id == id; });
+            if (it != clients.end()) c = *it;
+        }
+        if (!c.client) {
+            c.id = id;
+            try {
+                c.device = BluetoothLEDevice::FromIdAsync(sub.Session().DeviceId().Id()).get();
+                if (c.device) c.name = to_string(c.device.Name());
+            } catch (hresult_error const&) {
+            }
+            log::info("Control: phone '{}' connected (subscribed to HID reports)", c.name);
+            if (c.device) tune_connection(c);
+        }
+        c.client = sub;
+        next.push_back(std::move(c));
+    }
+    {
+        std::lock_guard lock(clients_mutex);
+        for (const Client& old : clients) {
+            if (std::none_of(next.begin(), next.end(), [&](const Client& n) { return n.id == old.id; })) {
+                log::info("Control: phone '{}' disconnected", old.name);
+            }
+        }
+        clients = std::move(next);
+    }
+    bool now = !clients.empty();
+    if (now != connected.exchange(now)) PostMessageW(notify_window, kMsgControlState, now ? 1 : 0, 0);
+}
+
+// The subscribed phone whose Bluetooth name matches the target (exact, then containment, case-insensitive);
+// null means "all phones" (one connected, no target, or no match).
+GattSubscribedClient WinBtBackend::Impl::target_client() {
+    std::lock_guard lock(clients_mutex);
+    if (clients.size() < 2 || target.empty()) return nullptr;
+    auto lower = [](std::string s) {
+        for (char& ch : s) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+        return s;
+    };
+    std::string want = lower(target);
+    for (const Client& c : clients) {
+        if (lower(c.name) == want) return c.client;
+    }
+    for (const Client& c : clients) {
+        std::string have = lower(c.name);
+        if (!have.empty() && (have.find(want) != std::string::npos || want.find(have) != std::string::npos)) return c.client;
+    }
+    return nullptr;
 }
 
 void WinBtBackend::Impl::run() {
@@ -261,14 +331,7 @@ void WinBtBackend::Impl::run() {
             });
         }
 
-        mouse_report.SubscribedClientsChanged([this](GattLocalCharacteristic const& c, auto&&) {
-            auto clients = c.SubscribedClients();
-            bool now = clients.Size() > 0;
-            if (now == connected.exchange(now)) return;
-            log::info("Control: phone {} ", now ? "connected (subscribed to HID reports)" : "disconnected");
-            if (now) tune_connection(clients.GetAt(0).Session());
-            PostMessageW(notify_window, kMsgControlState, now ? 1 : 0, 0);
-        });
+        mouse_report.SubscribedClientsChanged([this](GattLocalCharacteristic const& c, auto&&) { update_clients(c); });
         hid.AdvertisementStatusChanged([](GattServiceProvider const&, GattServiceProviderAdvertisementStatusChangedEventArgs const& a) {
             log::info("Control: advertising status {} ({})", static_cast<int>(a.Status()), error_name(a.Error()));
         });
@@ -285,8 +348,14 @@ void WinBtBackend::Impl::run() {
         auto notify = [&](GattLocalCharacteristic const& c, const uint8_t* data, size_t size) {
             auto t0 = Clock::now();
             try {
-                for (auto const& r : c.NotifyValueAsync(to_buffer(data, size)).get()) {
-                    if (r.Status() != GattCommunicationStatus::Success) ++failed;
+                if (GattSubscribedClient only = target_client()) {  // several phones: just the focused one
+                    if (c.NotifyValueAsync(to_buffer(data, size), only).get().Status() != GattCommunicationStatus::Success) {
+                        ++failed;
+                    }
+                } else {
+                    for (auto const& r : c.NotifyValueAsync(to_buffer(data, size)).get()) {
+                        if (r.Status() != GattCommunicationStatus::Success) ++failed;
+                    }
                 }
             } catch (hresult_error const&) {
                 ++failed;

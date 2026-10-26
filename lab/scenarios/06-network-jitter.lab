@@ -1,0 +1,8 @@
+# Wi-Fi-like delivery (random delay + bursts after stalls): stays smooth, never queues, drops stale frames.
+expect Lab: impairment jitter 30 ms
+expect Video: .*jitter ([5-9]|[1-9]\d)\.\d ms
+expect Video: .*dropped [1-9]
+expect-not Lab: FAIL
+0     video ../fixtures/portrait.h265
+500   impair jitter=30 burst=6/60
+12500 quit

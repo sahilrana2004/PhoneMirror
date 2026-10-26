@@ -1,0 +1,12 @@
+# Losing the Bluetooth link while controlling hands the mouse and keyboard back to Windows.
+expect Control: capture on
+expect Lab: virtual iPhone disconnected
+expect Control: capture off
+expect Lab: virtual iPhone connected
+expect-not Lab: FAIL
+0     video ../fixtures/portrait.h265
+1500  focus
+2000  click 0.5 0.5
+3000  disconnect
+4000  connect
+5000  quit

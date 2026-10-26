@@ -51,11 +51,13 @@ private:
     void on_sizing(WPARAM edge, RECT* rect) const;
     void apply_aspect(float aspect);
     int dip(int value) const { return MulDiv(value, static_cast<int>(dpi_), 96); }
+    float margin() const { return renderer_.margin_px(); }
 
     void show_hint(std::wstring text, UINT ms);
     void on_click_to_control(POINT client_pt);
     bool map_to_screen(POINT client_pt, float& nx, float& ny);
     void start_calibration();
+    void target_this_phone();
     void finish_calibration(POINT client_pt);
     bool on_shortcut(UINT vk, bool ctrl, bool shift);
 

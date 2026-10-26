@@ -1,0 +1,29 @@
+phones 2
+# Two phones mirrored at once: keyboard/mouse input goes only to the phone whose window is being used.
+expect Lab: input now goes to \[Lab iPhone 1\]
+expect Lab: input now goes to \[Lab iPhone 2\]
+expect Lab: PASS \[Lab iPhone 1\] text 'one'
+expect Lab: PASS \[Lab iPhone 2\] text 'two'
+expect Lab: \[Lab iPhone 2\] Home
+expect-not Lab: \[Lab iPhone 1\] Home
+expect-not Lab: FAIL
+0     session 1
+0     video ../fixtures/portrait.h265
+0     session 2
+0     video ../fixtures/landscape.h265
+1500  session 1
+1600  focus
+2000  click 0.5 0.5
+2500  type one
+3500  key ctrl+alt
+3800  session 2
+3900  focus
+4300  click 0.5 0.5
+4800  type two
+5800  key ctrl+1
+6300  key ctrl+alt
+6500  session 1
+6600  expect-text one
+6700  session 2
+6800  expect-text two
+7500  quit

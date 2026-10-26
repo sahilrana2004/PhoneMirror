@@ -31,6 +31,8 @@ public:
     const std::wstring& name() const { return name_; }
     MirrorWindow& window() { return window_; }
     AudioPipeline& audio() { return *audio_; }
+    VideoPipeline& video() { return *video_; }
+    FileSource& files() { return files_; }
 
 private:
     int slot_;

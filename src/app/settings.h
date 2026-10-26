@@ -24,6 +24,9 @@ public:
     void set_bool(const std::string& key, bool value);
 
     static std::filesystem::path data_dir();  // %APPDATA%\PhoneMirror (created on demand)
+    // Lab/tests: keep settings, logs and captured media in a separate folder.
+    static void set_data_dir(const std::filesystem::path& dir);
+    static bool data_dir_overridden();
 
 private:
     Settings() = default;

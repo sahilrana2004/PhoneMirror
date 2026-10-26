@@ -2,11 +2,13 @@
 
 #include <d2d1_3.h>
 #include <d3d11_1.h>
+#include <dcomp.h>
 #include <dwrite.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
 #include <atomic>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -51,7 +53,16 @@ public:
     void set_stats_visible(bool visible);
     bool stats_visible() const { return stats_visible_; }
     void set_hover_bar(HoverBarState state);
+    // Extra Direct2D layer drawn over the phone screen each frame (DIP rect of the screen); used by the lab.
+    using Painter = std::function<void(ID2D1DeviceContext2* ctx, const D2D1_RECT_F& screen)>;
+    void set_painter(Painter painter);
     void set_tearing_allowed(bool allowed) { tearing_allowed_ = allowed; }  // before init()
+
+    // Windowed: DirectComposition swapchain with per-pixel alpha, so only the rounded phone screen and its
+    // soft shadow are visible. Fullscreen: opaque HWND flip swapchain (independent flip, tearing) - the
+    // lowest-latency path. Switching recreates the swapchain.
+    void set_fullscreen(bool fullscreen);
+    float margin_px() const { return margin_px_; }  // transparent border around the screen (0 in fullscreen)
 
     // Current video frame at its native resolution as top-down BGRA (no mask/bezel); false if no video.
     bool capture_frame(std::vector<uint8_t>& bgra, UINT& width, UINT& height);
@@ -79,7 +90,7 @@ private:
     void draw_stats();
     void draw_hover_bar();
     void draw_quad(ID3D11RenderTargetView* target, float vw, float vh, const float rect[4], float radius,
-                   const SliceViews* views);
+                   const SliceViews* views, bool transparent_outside);
     void handle_device_lost();
     const SliceViews* views_for(const VideoFrame& frame);
 
@@ -127,6 +138,12 @@ private:
     std::wstring stats_;
     std::atomic<bool> stats_visible_ = false;
     HoverBarState bar_;
+    Painter painter_;
+    bool composition_ = true;
+    float margin_px_ = 0;
+    ComPtr<IDCompositionDevice> dcomp_;
+    ComPtr<IDCompositionTarget> dcomp_target_;
+    ComPtr<IDCompositionVisual> dcomp_visual_;
     bool tearing_allowed_ = true;
     ComPtr<IDWriteTextFormat> glyph_format_;
     ComPtr<ID2D1SolidColorBrush> accent_brush_;

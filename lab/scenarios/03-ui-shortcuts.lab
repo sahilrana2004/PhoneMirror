@@ -1,0 +1,15 @@
+# Screenshot, stats overlay and fullscreen shortcuts.
+expect Screenshot \d+x\d+ -> .*\(ok\)
+expect UI: stats \(.*stats on\)
+expect UI: stats \(.*stats off\)
+expect UI: fullscreen on
+expect UI: fullscreen off
+expect-files media/*.png 1
+0     video ../fixtures/portrait.h265
+1500  focus
+2000  key ctrl+shift+s
+2500  key f3
+3500  key f11
+5000  key f11
+5500  key f3
+6500  quit

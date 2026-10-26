@@ -1,0 +1,14 @@
+# Recording keeps the phone's stream as-is, includes audio, and starts a new segment when the phone rotates.
+expect Recording: writing .*\(H\.265 994x2160\)
+expect Recording: writing .*\(H\.265 2160x994\)
+expect Recording: segment closed
+expect-files media/*.mp4 2
+expect-probe media/*.mp4 codec_name=hevc
+expect-probe media/*.mp4 codec_name=aac
+0     video ../fixtures/portrait.h265
+0     audio ../fixtures/tone.m4a
+1500  focus
+2000  key ctrl+shift+r
+5000  video ../fixtures/landscape.h265
+8000  key ctrl+shift+r
+9000  quit
