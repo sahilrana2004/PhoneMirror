@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
 
 set(VCPKG_TARGET_TRIPLET x64-windows-static CACHE STRING "")
-project(PhoneMirror VERSION 0.1.0 LANGUAGES C CXX RC)
+project(PhoneMirror VERSION 1.0.1 LANGUAGES C CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
