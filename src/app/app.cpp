@@ -49,6 +49,8 @@ int App::run(HINSTANCE instance) {
         return 1;
     }
     mirror_.show();
+    mirror_.set_control(&control_);
+    control_.start(mirror_.hwnd());
 
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);

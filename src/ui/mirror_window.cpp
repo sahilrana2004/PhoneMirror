@@ -17,6 +17,7 @@ constexpr wchar_t kClassName[] = L"PhoneMirror.Mirror";
 constexpr int kResizeBorderDip = 8;
 constexpr int kTitleZoneDip = 44;
 constexpr int kMinHeightDip = 320;
+constexpr UINT_PTR kHintTimer = 1;
 
 void apply_dwm_style(HWND hwnd) {
     BOOL dark = TRUE;
@@ -102,7 +103,41 @@ void MirrorWindow::show() {
     SetForegroundWindow(hwnd_);
 }
 
-void MirrorWindow::hide() { ShowWindow(hwnd_, SW_HIDE); }
+void MirrorWindow::hide() {
+    capture_.end();
+    ShowWindow(hwnd_, SW_HIDE);
+}
+
+void MirrorWindow::set_control(IControlBackend* backend) {
+    control_ = backend;
+    capture_.attach(hwnd_, backend);
+    capture_.on_state = [this](bool on) {
+        if (on) {
+            show_hint(L"Controlling iPhone · Ctrl+Alt to release", 3000);
+        } else {
+            show_hint(L"", 0);
+        }
+    };
+}
+
+void MirrorWindow::show_hint(std::wstring text, UINT ms) {
+    renderer_.set_overlay(std::move(text));
+    if (ms) {
+        SetTimer(hwnd_, kHintTimer, ms, nullptr);
+    } else {
+        KillTimer(hwnd_, kHintTimer);
+    }
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void MirrorWindow::on_click_to_control() {
+    if (!control_) return;
+    if (capture_.begin()) return;
+    wchar_t pc[MAX_COMPUTERNAME_LENGTH + 1] = {};
+    DWORD len = ARRAYSIZE(pc);
+    GetComputerNameW(pc, &len);
+    show_hint(std::wstring(L"Keyboard/mouse not connected: on iPhone open Settings › Bluetooth › ") + pc, 5000);
+}
 
 bool MirrorWindow::visible() const { return IsWindowVisible(hwnd_) && !IsIconic(hwnd_); }
 
@@ -117,7 +152,22 @@ LRESULT CALLBACK MirrorWindow::wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 }
 
 LRESULT MirrorWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
+    if (LRESULT captured = 0; capture_.handle(msg, wp, lp, captured)) return captured;
     switch (msg) {
+    case WM_LBUTTONDOWN:
+        on_click_to_control();
+        return 0;
+    case WM_TIMER:
+        if (wp == kHintTimer) show_hint(L"", 0);
+        return 0;
+    case kMsgControlState:
+        if (wp) {
+            show_hint(L"iPhone keyboard & mouse connected · click to control", 3000);
+        } else {
+            capture_.end();
+            show_hint(L"iPhone keyboard & mouse disconnected", 3000);
+        }
+        return 0;
     case WM_NCCALCSIZE:
         return 0;  // client area covers the whole window, including the creation-time call with wp == FALSE
     case WM_NCHITTEST:

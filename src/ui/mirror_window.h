@@ -4,6 +4,7 @@
 
 #include <string>
 
+#include "input/input_capture.h"
 #include "video/renderer.h"
 
 namespace pm {
@@ -22,8 +23,11 @@ public:
     HWND hwnd() const { return hwnd_; }
     Renderer& renderer() { return renderer_; }
     void set_status(std::wstring title, std::wstring detail);
+    void set_control(IControlBackend* backend);
 
 private:
+    void show_hint(std::wstring text, UINT ms);
+    void on_click_to_control();
     static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp);
     LRESULT hit_test(POINT screen_pt) const;
@@ -36,6 +40,8 @@ private:
     UINT dpi_ = 96;
     float screen_aspect_ = 0;
     Renderer renderer_;
+    InputCapture capture_;
+    IControlBackend* control_ = nullptr;
 };
 
 }  // namespace pm

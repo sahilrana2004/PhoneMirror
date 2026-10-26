@@ -176,6 +176,7 @@ bool Renderer::create_device() {
     }
     d2d_ctx_->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 0.92f), &title_brush_);
     d2d_ctx_->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 0.55f), &detail_brush_);
+    d2d_ctx_->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 0.62f), &overlay_brush_);
     return vs_ && ps_ && params_ && sampler_;
 }
 
@@ -378,6 +379,7 @@ void Renderer::draw_and_present() {
     ctx_->Draw(3, 0);
 
     if (!views) draw_idle_text();
+    draw_overlay();
 
     HRESULT hr = swapchain_->Present(0, tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0);
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
@@ -403,6 +405,35 @@ void Renderer::draw_idle_text() {
     d2d_ctx_->EndDraw();
 }
 
+void Renderer::set_overlay(std::wstring text) {
+    std::lock_guard lock(lock_);
+    overlay_ = std::move(text);
+}
+
+void Renderer::draw_overlay() {
+    if (overlay_.empty()) return;
+    float scale = 96.0f / static_cast<float>(dpi_);
+    float aspect = has_frame_ ? static_cast<float>(frame_.width) / static_cast<float>(frame_.height) : screen_aspect_;
+    geometry::Rect s = geometry::screen_rect(static_cast<float>(width_), static_cast<float>(height_), aspect);
+    ComPtr<IDWriteTextLayout> layout;
+    dwrite_->CreateTextLayout(overlay_.c_str(), static_cast<UINT32>(overlay_.size()), detail_format_.Get(),
+                              s.w * 0.9f * scale, 200.0f, &layout);
+    if (!layout) return;
+    DWRITE_TEXT_METRICS m;
+    layout->GetMetrics(&m);
+    float pad_x = 14.0f;
+    float pad_y = 7.0f;
+    float cx = (s.x + s.w * 0.5f) * scale;
+    float bottom = (s.y + s.h) * scale - 28.0f;
+    D2D1_RECT_F pill = D2D1::RectF(cx - m.width * 0.5f - pad_x, bottom - m.height - 2 * pad_y, cx + m.width * 0.5f + pad_x,
+                                   bottom);
+    d2d_ctx_->BeginDraw();
+    float r = (pill.bottom - pill.top) * 0.5f;
+    d2d_ctx_->FillRoundedRectangle(D2D1::RoundedRect(pill, r, r), overlay_brush_.Get());
+    d2d_ctx_->DrawTextLayout(D2D1::Point2F(pill.left + pad_x - m.left, pill.top + pad_y), layout.Get(), title_brush_.Get());
+    d2d_ctx_->EndDraw();
+}
+
 void Renderer::handle_device_lost() {
     // The decoder's surfaces die with the device; the next keyframe after a codec reset restores video.
     has_frame_ = false;
@@ -416,6 +447,7 @@ void Renderer::handle_device_lost() {
     swapchain_.Reset();
     title_brush_.Reset();
     detail_brush_.Reset();
+    overlay_brush_.Reset();
     d2d_ctx_.Reset();
     d2d_device_.Reset();
     sampler_.Reset();

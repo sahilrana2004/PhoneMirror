@@ -43,6 +43,7 @@ public:
     void set_dpi(UINT dpi);
     void set_screen_aspect(float aspect);
     void set_idle_text(std::wstring title, std::wstring detail);
+    void set_overlay(std::wstring text);  // short hint pill over the screen; empty hides it
 
     ID3D11Device* device() const { return device_.Get(); }
     std::recursive_mutex& device_lock() { return lock_; }
@@ -62,6 +63,7 @@ private:
     void wait_for_swapchain();
     void draw_and_present();
     void draw_idle_text();
+    void draw_overlay();
     void handle_device_lost();
     const SliceViews* views_for(const VideoFrame& frame);
 
@@ -97,12 +99,14 @@ private:
     ComPtr<ID2D1Bitmap1> d2d_target_;
     ComPtr<ID2D1SolidColorBrush> title_brush_;
     ComPtr<ID2D1SolidColorBrush> detail_brush_;
+    ComPtr<ID2D1SolidColorBrush> overlay_brush_;
     ComPtr<IDWriteFactory> dwrite_;
     ComPtr<IDWriteTextFormat> title_format_;
     ComPtr<IDWriteTextFormat> detail_format_;
 
     std::wstring title_;
     std::wstring detail_;
+    std::wstring overlay_;
 };
 
 }  // namespace pm

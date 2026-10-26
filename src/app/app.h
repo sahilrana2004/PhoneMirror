@@ -8,6 +8,7 @@
 #include "airplay/receiver.h"
 #include "app/file_source.h"
 #include "audio/audio_pipeline.h"
+#include "input/winbt_backend.h"
 #include "app/tray.h"
 #include "ui/mirror_window.h"
 #include "video/pipeline.h"
@@ -35,6 +36,7 @@ private:
     HICON tray_icon_ = nullptr;
     std::wstring receiver_name_ = L"PhoneMirror";
     Tray tray_;
+    WinBtBackend control_;
     MirrorWindow mirror_;
     // Destroyed in reverse: the receiver stops delivering before the pipeline and window go away.
     std::unique_ptr<VideoPipeline> pipeline_;
