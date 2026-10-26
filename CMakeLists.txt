@@ -70,3 +70,8 @@ target_compile_options(PhoneMirror PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4 /permis
 target_link_options(PhoneMirror PRIVATE /MANIFEST:NO)
 target_link_libraries(PhoneMirror PRIVATE uxplay ${FFMPEG_LIBRARIES}
   d3d11 dxgi d2d1 dwrite dwmapi shell32 iphlpapi ws2_32 ole32 avrt)
+
+# M7 spike: can Windows itself be a BLE HID peripheral? (console tool, not shipped)
+add_executable(bt_spike tools/bt_spike/main.cpp)
+target_compile_options(bt_spike PRIVATE /W4 /permissive- /utf-8 /EHsc)
+target_link_libraries(bt_spike PRIVATE windowsapp)
