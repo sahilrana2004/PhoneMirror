@@ -23,10 +23,15 @@ using Microsoft::WRL::ComPtr;
 
 constexpr int kRate = 44100;  // every AirPlay audio format is 44.1 kHz stereo
 constexpr int kChannels = 2;
-constexpr size_t kRingFrames = kRate;           // 1 s of headroom
-constexpr size_t kStartFrames = kRate / 50;     // 20 ms queued before (re)starting playback
-constexpr size_t kTargetFrames = kRate / 40;    // trim back to 25 ms ...
-constexpr size_t kCeilingFrames = kRate * 3 / 50;  // ... once more than 60 ms is queued
+constexpr size_t kRingFrames = kRate * 2;            // 2 s of headroom
+constexpr size_t kMinTargetFrames = kRate * 50 / 1000;   // adaptive buffer: 50 ms on a clean link ...
+constexpr size_t kStartTargetFrames = kRate * 80 / 1000; // first guess before the link is known
+constexpr size_t kMaxTargetFrames = kRate * 300 / 1000;  // ... up to 300 ms on a bad one
+constexpr size_t kGrowFrames = kRate * 20 / 1000;        // +20 ms per dropout
+constexpr size_t kGapMarginFrames = kRate * 25 / 1000;   // margin over the longest recent arrival gap
+constexpr size_t kShrinkFrames = kRate * 10 / 1000;      // -10 ms per 15 s without one
+constexpr size_t kRateBandFrames = kRate * 40 / 1000;    // speed up beyond target + 40 ms
+constexpr size_t kHardTrimFrames = kRate * 500 / 1000;   // cut only after a >0.5 s pile-up
 
 // Codec configuration exactly as UxPlay feeds GStreamer (renderers/audio_renderer.c).
 constexpr uint8_t kAacEld[] = {0xf8, 0xe8, 0x50, 0x00};  // ct 8: AAC-ELD 44100/2, 480 spf
@@ -175,6 +180,18 @@ void AudioPipeline::push(const AVFrame* f) {
     }
     if (Recorder* r = recorder_.load()) r->push_audio(scratch_.data(), static_cast<int>(frames));
 
+    // Arrival-gap tracker: the longest recent silence between packets is how much audio the buffer must
+    // hold to ride through the next one. The peak decays ~2 ms per second so the buffer can shrink again.
+    LARGE_INTEGER now, freq;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&freq);
+    if (last_push_qpc_) {
+        double gap_ms = static_cast<double>(now.QuadPart - last_push_qpc_) * 1000.0 / static_cast<double>(freq.QuadPart);
+        peak_gap_ms_ = std::max(gap_ms, peak_gap_ms_ - gap_ms * 0.002);
+        peak_gap_frames_ = static_cast<size_t>(peak_gap_ms_ * kRate / 1000.0);
+    }
+    last_push_qpc_ = now.QuadPart;
+
     size_t write = write_pos_.load(std::memory_order_relaxed);
     size_t read = read_pos_.load(std::memory_order_acquire);
     size_t space = kRingFrames - (write - read);
@@ -239,12 +256,22 @@ void AudioPipeline::render_loop() {
         log::info("Audio: WASAPI shared, buffer {:.1f} ms, period {:.1f} ms", buffer_frames * 1000.0 / kRate,
                   period / 10000.0);
 
+        // Adaptive jitter buffer. AirPlay audio arrives over Wi-Fi in uneven clumps, so the amount queued
+        // (ring + WASAPI padding) is steered toward a target that grows by 20 ms after every dropout and
+        // relaxes slowly while the link is calm. Small deviations are absorbed by playing up to 1.5 %
+        // faster/slower (linear-interpolation resampling, inaudible) instead of cutting or repeating audio.
         bool playing = false;
+        size_t target = kStartTargetFrames;
+        double frac = 0.0;   // fractional read offset for the rate-adjusted reader
+        double rate = 1.0;
+        uint64_t underruns = 0, total_underruns = 0, trims = 0;
+        ULONGLONG last_underrun = GetTickCount64(), last_stats = GetTickCount64();
         HANDLE waits[2] = {wake_, buffer_event};
         while (running_ && !device_changed_) {
             WaitForMultipleObjects(2, waits, FALSE, 100);
             if (flush_.exchange(false)) {
                 read_pos_.store(write_pos_.load(std::memory_order_acquire), std::memory_order_release);
+                frac = 0.0;
                 if (playing) {
                     client->Stop();
                     client->Reset();
@@ -255,37 +282,81 @@ void AudioPipeline::render_loop() {
             hr = client->GetCurrentPadding(&padding);
             if (FAILED(hr)) break;  // device invalidated: reopen the (new) default device
 
+            ULONGLONG now = GetTickCount64();
+            const size_t delay = static_cast<size_t>(extra_delay_frames_.load());  // "Sync audio to video" offset
+            // Hold at least the longest recent arrival gap plus a margin (predictive), never less.
+            size_t needed = std::min(peak_gap_frames_.load() + kGapMarginFrames, kMaxTargetFrames);
+            target = std::max(target, needed);
+            const size_t goal = target + delay;
             size_t read = read_pos_.load(std::memory_order_relaxed);
             size_t available = write_pos_.load(std::memory_order_acquire) - read;
-            const size_t delay = static_cast<size_t>(extra_delay_frames_.load());  // "Sync audio to video" offset
-            if (!playing && available < kStartFrames + delay) continue;
-            if (available + padding > kCeilingFrames + delay) {
-                size_t excess = std::min(available, available + padding - kTargetFrames - delay);
+            size_t level = available + padding;
+
+            if (!playing && available < goal) continue;  // (re)prime to the target before starting
+            if (level > goal + kHardTrimFrames) {  // long stall then a flood: jump back to the target once
+                size_t excess = std::min(available, level - goal);
                 read += excess;
                 available -= excess;
+                level -= excess;
+                ++trims;
             }
-            size_t n = std::min<size_t>(available, buffer_frames - padding);
+            if (level > goal + kRateBandFrames) {
+                rate = 1.015;
+            } else if (level + kRateBandFrames / 2 < goal) {
+                rate = 0.985;
+            } else if ((rate > 1.0 && level <= goal) || (rate < 1.0 && level >= goal)) {
+                rate = 1.0;  // hysteresis: hold the correction until back on target
+            }
+
+            // Frames we can produce without reading past the newest sample (+1 for interpolation).
+            size_t producible = available > 2 ? static_cast<size_t>((available - 2 - frac) / rate) : 0;
+            size_t n = std::min<size_t>(producible, buffer_frames - padding);
             if (n) {
                 BYTE* out = nullptr;
                 if (FAILED(render->GetBuffer(static_cast<UINT32>(n), &out))) break;
                 float gain = (muted_ || focus_muted_) ? 0.0f : gain_.load(std::memory_order_relaxed) * local_volume_.load(std::memory_order_relaxed);
                 auto* dst = reinterpret_cast<float*>(out);
+                double pos = frac;
                 for (size_t i = 0; i < n; ++i) {
-                    size_t slot = ((read + i) % kRingFrames) * kChannels;
-                    dst[i * 2] = ring_[slot] * gain;
-                    dst[i * 2 + 1] = ring_[slot + 1] * gain;
+                    auto k = static_cast<size_t>(pos);
+                    auto t = static_cast<float>(pos - static_cast<double>(k));
+                    size_t a = ((read + k) % kRingFrames) * kChannels;
+                    size_t b = ((read + k + 1) % kRingFrames) * kChannels;
+                    dst[i * 2] = (ring_[a] + (ring_[b] - ring_[a]) * t) * gain;
+                    dst[i * 2 + 1] = (ring_[a + 1] + (ring_[b + 1] - ring_[a + 1]) * t) * gain;
+                    pos += rate;
                 }
                 render->ReleaseBuffer(static_cast<UINT32>(n), 0);
-                read += n;
+                auto whole = static_cast<size_t>(pos);
+                read += whole;
+                frac = pos - static_cast<double>(whole);
             }
             read_pos_.store(read, std::memory_order_release);
             if (!playing && n) {
                 client->Start();
                 playing = true;
             } else if (playing && !n && !padding) {
-                client->Stop();  // underrun: re-prime to 20 ms instead of stuttering on every packet
+                // Ran dry: the link stalled longer than the buffer covers. Grow the target and re-prime.
+                client->Stop();
                 client->Reset();
                 playing = false;
+                frac = 0.0;
+                ++underruns;
+                ++total_underruns;
+                last_underrun = now;
+                target = std::min(target + kGrowFrames, kMaxTargetFrames);
+            }
+            if (playing && now - last_underrun > 15000 && target > kMinTargetFrames) {
+                target = std::max(target - kShrinkFrames, kMinTargetFrames);  // calm link: win latency back
+                last_underrun = now;
+            }
+            if (now - last_stats >= 10000) {
+                if (playing || underruns) {
+                    log::info("Audio: buffer target {:.0f} ms (peak gap {:.0f} ms), queued {:.0f} ms, rate {:.3f}, underruns {} (total {}), trims {}",
+                              goal * 1000.0 / kRate, peak_gap_frames_.load() * 1000.0 / kRate, level * 1000.0 / kRate, rate, underruns, total_underruns, trims);
+                }
+                underruns = trims = 0;
+                last_stats = now;
             }
         }
         if (playing) client->Stop();

@@ -39,7 +39,10 @@ public:
     bool on_codec(bool h265) override;
     void on_video_size(int width, int height) override;
     void on_video(const uint8_t* data, size_t size, bool h265) override;
-    void on_link_rtt(double ms) override { rtt_ms_ = ms; }
+    // UxPlay reports a ~68.7 s sentinel until the first timing exchange completes; keep only real values.
+    void on_link_rtt(double ms) override {
+        if (ms >= 0 && ms < 5000) rtt_ms_ = ms;
+    }
 
     std::string client_name() const {
         std::lock_guard lock(name_mutex_);

@@ -128,6 +128,9 @@ bool FileSource::start_audio(const std::filesystem::path& path, AudioSink& sink)
         AVRational tb = fmt->streams[index]->time_base;
         AVPacket* pkt = av_packet_alloc();
         ULONGLONG start = GetTickCount64();
+        std::minstd_rand rng(54321);
+        std::vector<std::vector<uint8_t>> held;
+        uint64_t packets = 0;
         while (running_ && av_read_frame(fmt, pkt) >= 0) {
             if (pkt->stream_index == index) {
                 if (pkt->pts != AV_NOPTS_VALUE) {  // AAC priming makes the first pts negative
@@ -135,6 +138,22 @@ bool FileSource::start_audio(const std::filesystem::path& path, AudioSink& sink)
                     auto now = static_cast<int64_t>(GetTickCount64() - start);
                     if (due_ms > now) Sleep(static_cast<DWORD>(due_ms - now));
                 }
+                // Same Wi-Fi model as the video: random extra delay, and stalls released as a burst.
+                Impairment imp;
+                {
+                    std::lock_guard lock(impairment_mutex_);
+                    imp = impairment_;
+                }
+                ++packets;
+                if (imp.burst_every > 0 && imp.burst_size > 0 &&
+                    (packets % imp.burst_every) < static_cast<uint64_t>(imp.burst_size)) {
+                    held.emplace_back(pkt->data, pkt->data + pkt->size);
+                    av_packet_unref(pkt);
+                    continue;
+                }
+                if (imp.jitter_ms > 0) Sleep(static_cast<DWORD>(rng() % (imp.jitter_ms + 1)));
+                for (auto& h : held) sink.on_audio(h.data(), h.size(), ct);
+                held.clear();
                 sink.on_audio(pkt->data, static_cast<size_t>(pkt->size), ct);
             }
             av_packet_unref(pkt);

@@ -1,0 +1,10 @@
+# Audio over a jittery link: the adaptive buffer grows after early dropouts, then plays without any
+# (the last 10 s stats window reports 0 underruns) instead of stuttering on every Wi-Fi hiccup.
+expect Audio: AAC-LC 44100 Hz stereo
+expect Lab: impairment jitter 25 ms, burst 4 of every 50 frames
+expect Audio: buffer target .* underruns 0 \(total
+expect-not Lab: FAIL
+0     audio ../fixtures/tone.m4a
+0     video ../fixtures/portrait.h265
+200   impair jitter=25 burst=4/50
+24000 quit

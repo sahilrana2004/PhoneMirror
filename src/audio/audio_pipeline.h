@@ -78,6 +78,10 @@ private:
     std::atomic<bool> muted_ = false;
     std::atomic<bool> focus_muted_ = false;
     std::atomic<int> extra_delay_frames_ = 0;
+    // Network-thread arrival tracking feeding the adaptive buffer target.
+    int64_t last_push_qpc_ = 0;
+    double peak_gap_ms_ = 0;
+    std::atomic<size_t> peak_gap_frames_ = 0;
     std::atomic<Recorder*> recorder_ = nullptr;
     std::atomic<bool> running_ = true;
     std::atomic<bool> device_changed_ = false;
