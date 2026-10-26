@@ -30,7 +30,10 @@ int App::run(HINSTANCE instance) {
     // Hidden top-level (not message-only) so it receives the TaskbarCreated broadcast.
     hwnd_ = CreateWindowExW(0, kAppWindowClass, L"PhoneMirror", WS_OVERLAPPED, 0, 0, 0, 0, nullptr, nullptr,
                             instance, this);
-    if (!hwnd_) return 1;
+    if (!hwnd_) {
+        log::error("App window creation failed: {}", GetLastError());
+        return 1;
+    }
     taskbar_created_ = RegisterWindowMessageW(L"TaskbarCreated");
 
     tray_icon_ = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
@@ -57,8 +60,9 @@ int App::run(HINSTANCE instance) {
 
 LRESULT CALLBACK App::wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_NCCREATE) {
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA,
-                          reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams));
+        auto* self = static_cast<App*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
+        self->hwnd_ = hwnd;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
     }
     auto* self = reinterpret_cast<App*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     return self ? self->handle(msg, wp, lp) : DefWindowProcW(hwnd, msg, wp, lp);

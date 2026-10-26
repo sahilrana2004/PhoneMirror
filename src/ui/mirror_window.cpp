@@ -96,8 +96,7 @@ LRESULT CALLBACK MirrorWindow::wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 LRESULT MirrorWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_NCCALCSIZE:
-        if (wp) return 0;  // client area covers the whole window
-        break;
+        return 0;  // client area covers the whole window, including the creation-time call with wp == FALSE
     case WM_NCHITTEST:
         return hit_test({GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
     case WM_NCLBUTTONDBLCLK:

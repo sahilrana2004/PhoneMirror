@@ -8,8 +8,8 @@ namespace pm::geometry {
 inline constexpr float kBezel = 0.012f;
 inline constexpr float kCorner = 0.14f;
 
-// iPhone 15 / 16 / 17 family native portrait resolution; replaced by the stream size once connected.
-inline constexpr float kDefaultAspect = 1179.0f / 2556.0f;
+// iPhone 17 Pro native portrait resolution; replaced by the stream size once connected.
+inline constexpr float kDefaultAspect = 1206.0f / 2622.0f;
 
 struct Rect {
     float x, y, w, h;
